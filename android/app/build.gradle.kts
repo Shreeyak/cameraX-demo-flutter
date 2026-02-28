@@ -56,6 +56,6 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("com.google.guava:guava:33.3.1-android")
-    implementation("androidx.concurrent:concurrent-futures-ktx:1.2.0")
 }

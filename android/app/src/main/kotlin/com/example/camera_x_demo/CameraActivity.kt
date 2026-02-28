@@ -4,19 +4,22 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import android.view.Surface
 import android.widget.Toast
-import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
+import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
@@ -30,11 +33,14 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import com.example.camera_x_demo.databinding.ActivityCameraBinding
+import java.io.ByteArrayInputStream
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Native Android CameraX activity that:
@@ -44,11 +50,12 @@ import java.util.concurrent.Executors
  * - Disables auto-focus, auto-exposure, and auto-white-balance via Camera2 interop
  * - Targets 4K (3840x2160) resolution and verifies it by reading image dimensions
  */
-class CameraActivity : ComponentActivity() {
+class CameraActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityCameraBinding
     private var imageCapture: ImageCapture? = null
-    private var latestBitmap: Bitmap? = null
+    @Volatile private var latestBitmap: Bitmap? = null
+    private var reusableBitmap: Bitmap? = null  // pre-allocated bitmap for analysis frames
     private lateinit var cameraExecutor: ExecutorService
 
     // ── Permission handling ─────────────────────────────────────────────
@@ -83,8 +90,21 @@ class CameraActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        cameraExecutor.shutdown()
+        // Clear ImageView before recycling to avoid "Canvas: trying to use a recycled bitmap"
+        binding.thumbnailView.setImageBitmap(null)
         latestBitmap?.recycle()
+        latestBitmap = null
+        reusableBitmap?.recycle()
+        reusableBitmap = null
+        // Shut down executor and wait for in-flight work to finish
+        cameraExecutor.shutdown()
+        try {
+            if (!cameraExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+                cameraExecutor.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            cameraExecutor.shutdownNow()
+        }
     }
 
     // ── Camera setup ────────────────────────────────────────────────────
@@ -175,7 +195,27 @@ class CameraActivity : ComponentActivity() {
     // ── Disable AF / AE / AWB ───────────────────────────────────────────
     @OptIn(ExperimentalCamera2Interop::class)
     private fun disableAutoControls(camera: Camera) {
+        val camera2Info = Camera2CameraInfo.from(camera.cameraInfo)
         val camera2Control = Camera2CameraControl.from(camera.cameraControl)
+
+        // Query device-supported ranges for manual exposure parameters
+        val exposureRange: Range<Long>? = camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE
+        )
+        val sensitivityRange: Range<Int>? = camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE
+        )
+
+        // Clamp defaults to device-supported ranges
+        val defaultExposure = 33_333_333L  // ~33 ms (1/30 s)
+        val exposureTime = exposureRange?.clamp(defaultExposure) ?: defaultExposure
+
+        val defaultSensitivity = 200  // ISO 200
+        val sensitivity = sensitivityRange?.clamp(defaultSensitivity) ?: defaultSensitivity
+
+        Log.i(TAG, "Device exposure range : $exposureRange → using $exposureTime")
+        Log.i(TAG, "Device sensitivity range: $sensitivityRange → using $sensitivity")
+
         val result = camera2Control.setCaptureRequestOptions(
             CaptureRequestOptions.Builder()
                 // Auto-focus OFF
@@ -193,21 +233,29 @@ class CameraActivity : ComponentActivity() {
                     CaptureRequest.CONTROL_AWB_MODE,
                     CameraMetadata.CONTROL_AWB_MODE_OFF
                 )
-                // Manual exposure defaults (needed when AE is off to avoid black frames)
+                // Manual exposure — clamped to device-supported range
                 .setCaptureRequestOption(
                     CaptureRequest.SENSOR_EXPOSURE_TIME,
-                    33_333_333L  // ~33 ms  (1/30 s)
+                    exposureTime
                 )
                 .setCaptureRequestOption(
                     CaptureRequest.SENSOR_SENSITIVITY,
-                    200  // ISO 200
+                    sensitivity
                 )
                 .build()
         )
         result.addListener({
-            Log.i(TAG, "Camera2 interop: AF, AE, AWB all set to OFF")
-            runOnUiThread {
-                binding.statusText.text = "AF: OFF | AE: OFF | AWB: OFF"
+            try {
+                result.get()  // throws if the request was rejected
+                Log.i(TAG, "Camera2 interop: AF, AE, AWB all set to OFF")
+                runOnUiThread {
+                    binding.statusText.text = "AF: OFF | AE: OFF | AWB: OFF"
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to disable auto controls", e)
+                runOnUiThread {
+                    binding.statusText.text = "AF/AE/AWB: FAILED — ${e.message}"
+                }
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -218,11 +266,18 @@ class CameraActivity : ComponentActivity() {
         val h = imageProxy.height
 
         try {
-            val bitmap = imageProxyToBitmap(imageProxy)
-            latestBitmap = bitmap   // previous bitmap becomes GC-eligible
+            val bitmap = imageProxyToBitmap(imageProxy, w, h)
 
             runOnUiThread {
+                // Recycle the old bitmap AFTER removing it from the ImageView
+                val old = latestBitmap
+                latestBitmap = bitmap
                 binding.thumbnailView.setImageBitmap(bitmap)
+                // Safe to recycle now — ImageView no longer references old
+                if (old != null && old !== bitmap) {
+                    old.recycle()
+                }
+
                 val captureRes = imageCapture?.resolutionInfo?.resolution
                 binding.resolutionText.text = buildString {
                     append("Loop: ${w}x${h}")
@@ -237,29 +292,44 @@ class CameraActivity : ComponentActivity() {
     }
 
     /**
-     * Convert an RGBA_8888 ImageProxy to a Bitmap, handling row-stride padding.
+     * Convert an RGBA_8888 ImageProxy to a Bitmap.
+     * Reuses a pre-allocated bitmap when dimensions match to reduce GC pressure.
      */
-    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
+    private fun imageProxyToBitmap(imageProxy: ImageProxy, w: Int, h: Int): Bitmap {
         val plane = imageProxy.planes[0]
         val buffer = plane.buffer
         val pixelStride = plane.pixelStride
         val rowStride = plane.rowStride
-        val rowPadding = rowStride - pixelStride * imageProxy.width
+        val rowPadding = rowStride - pixelStride * w
 
-        // bitmap width accounts for any row-stride padding
-        val bitmapWidth = imageProxy.width + rowPadding / pixelStride
-        val bitmap = Bitmap.createBitmap(bitmapWidth, imageProxy.height, Bitmap.Config.ARGB_8888)
-        buffer.rewind()
-        bitmap.copyPixelsFromBuffer(buffer)
-
-        // crop away padding if present
-        return if (rowPadding > 0) {
-            Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height).also {
-                if (it !== bitmap) bitmap.recycle()
-            }
-        } else {
-            bitmap
+        if (rowPadding == 0) {
+            // No padding — copy directly into a reusable bitmap
+            val bitmap = getOrCreateBitmap(w, h)
+            buffer.rewind()
+            bitmap.copyPixelsFromBuffer(buffer)
+            return bitmap
         }
+
+        // Row-stride padding present — need padded-width bitmap, then crop
+        val bitmapWidth = w + rowPadding / pixelStride
+        val padded = Bitmap.createBitmap(bitmapWidth, h, Bitmap.Config.ARGB_8888)
+        buffer.rewind()
+        padded.copyPixelsFromBuffer(buffer)
+        val cropped = Bitmap.createBitmap(padded, 0, 0, w, h)
+        if (cropped !== padded) padded.recycle()
+        return cropped
+    }
+
+    /** Returns a reusable bitmap if dimensions match, or allocates a new one. */
+    private fun getOrCreateBitmap(w: Int, h: Int): Bitmap {
+        val existing = reusableBitmap
+        if (existing != null && !existing.isRecycled && existing.width == w && existing.height == h) {
+            return existing
+        }
+        existing?.recycle()
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        reusableBitmap = bitmap
+        return bitmap
     }
 
     // ── Save current frame to disk ──────────────────────────────────────
@@ -287,17 +357,18 @@ class CameraActivity : ComponentActivity() {
                     val rotation = imageProxy.imageInfo.rotationDegrees
                     imageProxy.close()
 
-                    // Write to MediaStore
+                    // Write to MediaStore with IS_PENDING for atomic visibility
                     val name = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
                         .format(System.currentTimeMillis())
                     val contentValues = ContentValues().apply {
                         put(MediaStore.MediaColumns.DISPLAY_NAME, "CXD_$name")
                         put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                             put(
                                 MediaStore.Images.Media.RELATIVE_PATH,
                                 "Pictures/CameraXDemo"
                             )
+                            put(MediaStore.Images.Media.IS_PENDING, 1)
                         }
                     }
 
@@ -306,7 +377,21 @@ class CameraActivity : ComponentActivity() {
                             MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues
                         )
                         uri?.let {
-                            contentResolver.openOutputStream(it)?.use { os -> os.write(bytes) }
+                            contentResolver.openOutputStream(it)?.use { os ->
+                                // Write JPEG bytes with EXIF orientation
+                                os.write(bytes)
+                                os.flush()
+                            }
+                            // Write EXIF rotation so gallery apps display correctly
+                            writeExifRotation(bytes, uri, rotation)
+
+                            // Clear IS_PENDING — file is now visible to other apps
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                val update = ContentValues().apply {
+                                    put(MediaStore.Images.Media.IS_PENDING, 0)
+                                }
+                                contentResolver.update(it, update, null, null)
+                            }
                         }
                         Log.i(TAG, "Saved ${w}x${h} to Pictures/CameraXDemo")
 
@@ -347,6 +432,28 @@ class CameraActivity : ComponentActivity() {
                 }
             }
         )
+    }
+
+    /**
+     * Write EXIF orientation tag to the saved JPEG via its MediaStore URI.
+     * Falls back gracefully if the content resolver doesn't support file descriptors.
+     */
+    private fun writeExifRotation(jpegBytes: ByteArray, uri: android.net.Uri, rotationDegrees: Int) {
+        val exifOrientation = when (rotationDegrees) {
+            90  -> ExifInterface.ORIENTATION_ROTATE_90
+            180 -> ExifInterface.ORIENTATION_ROTATE_180
+            270 -> ExifInterface.ORIENTATION_ROTATE_270
+            else -> ExifInterface.ORIENTATION_NORMAL
+        }
+        try {
+            contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val exif = ExifInterface(pfd.fileDescriptor)
+                exif.setAttribute(ExifInterface.TAG_ORIENTATION, exifOrientation.toString())
+                exif.saveAttributes()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not write EXIF orientation", e)
+        }
     }
 
     companion object {
