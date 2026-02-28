@@ -5,11 +5,12 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.RggbChannelVector
-import kotlin.math.ln
-import kotlin.math.pow
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -21,6 +22,7 @@ import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
@@ -82,14 +84,28 @@ class CameraManager(
     private var imageAnalysis: ImageAnalysis? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraExecutor: ExecutorService? = null
-    private var isAwbEnabled = false
-    private var colorTemperatureK: Int = 5500
+    // Current AWB mode — one of the CameraMetadata.CONTROL_AWB_MODE_* constants.
+    // Defaults to AUTO on startup; user can select any supported preset at runtime.
+    private var currentAwbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO
 
     // Stored manual sensor settings — kept in sync with the last successfully
     // applied capture options so that every setCaptureRequestOptions call can
     // write the FULL set (Camera2CameraControl replaces, it does not merge).
     private var storedExposureTimeNs: Long = 33_333_333L  // ~1/30 s
     private var storedSensitivityIso: Int = 200
+
+    // CCM captured from live AWB TotalCaptureResults. Updated whenever the
+    // hardware reports CONTROL_AWB_MODE_AUTO in a CaptureResult, so it
+    // always reflects the device's calibrated sensor→sRGB matrix for the
+    // current scene. Used in place of an identity matrix when switching to
+    // TRANSFORM_MATRIX mode, preventing the dull/desaturated appearance that
+    // an identity CCM causes on non-sRGB sensors.
+    @Volatile private var capturedColorTransform: ColorSpaceTransform? = null
+    // Gains reported by AWB — purely diagnostic (logged for debugging).
+    @Volatile private var capturedColorGains: RggbChannelVector? = null
+    // Static CCM from CameraCharacteristics (read once at camera start).
+    // Better OFF-mode fallback than identity when live CCM hasn't arrived yet.
+    @Volatile private var staticColorTransform: ColorSpaceTransform? = null
 
     // Preview surface provider — set by the PlatformView when it's created
     private var previewView: PreviewView? = null
@@ -211,12 +227,50 @@ class CameraManager(
                     .build()
 
                 // ── ImageAnalysis: continuous frame loop ──
-                imageAnalysis = ImageAnalysis.Builder()
+                // Also attaches a Camera2Interop capture callback to snoop
+                // COLOR_CORRECTION_TRANSFORM from AWB TotalCaptureResults.
+                val analysisBuilder = ImageAnalysis.Builder()
                     .setResolutionSelector(resolutionAnalysis)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setTargetRotation(Surface.ROTATION_0)
-                    .build()
+
+                Camera2Interop.Extender(analysisBuilder)
+                    .setSessionCaptureCallback(object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureCompleted(
+                            session: CameraCaptureSession,
+                            request: CaptureRequest,
+                            result: TotalCaptureResult
+                        ) {
+                            // Only store the CCM when hardware AWB is actually computing
+                            // it.  Once we switch to TRANSFORM_MATRIX mode the result
+                            // echoes back our own set value, so we stop updating.
+                            val awbMode = result.get(CaptureResult.CONTROL_AWB_MODE)
+                            if (awbMode != null && awbMode != CameraMetadata.CONTROL_AWB_MODE_OFF) {
+                                result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)?.let {
+                                    capturedColorTransform = it
+                                }
+                                // Capture and log AWB gains for diagnostic visibility.
+                                result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { gains ->
+                                    val prev = capturedColorGains
+                                    capturedColorGains = gains
+                                    // Log the first time, and whenever they change noticeably.
+                                    if (prev == null ||
+                                        Math.abs(gains.red - prev.red) > 0.05f ||
+                                        Math.abs(gains.blue - prev.blue) > 0.05f
+                                    ) {
+                                        Log.i(TAG, "AWB gains (mode=$awbMode): " +
+                                            "R=${"%.3f".format(gains.red)} " +
+                                            "Ge=${"%.3f".format(gains.greenEven)} " +
+                                            "Go=${"%.3f".format(gains.greenOdd)} " +
+                                            "B=${"%.3f".format(gains.blue)}")
+                                    }
+                                }
+                            }
+                        }
+                    })
+
+                imageAnalysis = analysisBuilder.build()
                     .also { analysis ->
                         analysis.setAnalyzer(cameraExecutor!!) { imageProxy ->
                             processFrame(imageProxy)
@@ -235,9 +289,30 @@ class CameraManager(
                 // immediately after bind; settings state will follow via the event stream.
                 callback(gatherResolutionInfo(), null)
 
-                // Disable AF, AE, AWB asynchronously. Result is pushed to Dart via
-                // the events EventChannel, not coupled to the startCamera response.
-                disableAutoControls(cam)
+                // Wait for the first AWB TotalCaptureResult so we have the
+                // device-calibrated COLOR_CORRECTION_TRANSFORM before we switch
+                // to TRANSFORM_MATRIX mode. Polls every 50 ms, times out at 2 s.
+                val handler = Handler(Looper.getMainLooper())
+                var waited = 0L
+                val waitForCcm = object : Runnable {
+                    override fun run() {
+                        when {
+                            capturedColorTransform != null -> {
+                                Log.i(TAG, "CCM ready after ${waited}ms — disabling auto controls")
+                                disableAutoControls(cam)
+                            }
+                            waited >= 2000L -> {
+                                Log.w(TAG, "Timed out waiting for CCM — using identity fallback")
+                                disableAutoControls(cam)
+                            }
+                            else -> {
+                                waited += 50L
+                                handler.postDelayed(this, 50L)
+                            }
+                        }
+                    }
+                }
+                handler.post(waitForCcm)
             } catch (e: Exception) {
                 Log.e(TAG, "Camera start failed", e)
                 callback(null, e)
@@ -270,7 +345,7 @@ class CameraManager(
         cameraExecutor = null
     }
 
-    // ── Disable AF / AE / AWB ───────────────────────────────────────────
+    // ── Disable AF / AE; keep AWB at current preset ────────────────────
     @OptIn(ExperimentalCamera2Interop::class)
     private fun disableAutoControls(camera: Camera) {
         val camera2Info = Camera2CameraInfo.from(camera.cameraInfo)
@@ -281,6 +356,22 @@ class CameraManager(
         val sensitivityRange: Range<Int>? = camera2Info.getCameraCharacteristic(
             CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE
         )
+
+        // Read static CCM from characteristics as a fallback for manual OFF mode.
+        staticColorTransform = camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.SENSOR_COLOR_TRANSFORM1
+        ) ?: camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.SENSOR_COLOR_TRANSFORM2
+        )
+        if (staticColorTransform != null) {
+            Log.i(TAG, "Static SENSOR_COLOR_TRANSFORM1 loaded")
+        }
+
+        // Log available AWB modes for diagnostic purposes.
+        val availableModes = camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES
+        )
+        Log.i(TAG, "Available AWB modes: ${availableModes?.toList()}")
 
         storedExposureTimeNs = exposureRange?.clamp(33_333_333L) ?: 33_333_333L
         storedSensitivityIso = sensitivityRange?.clamp(200) ?: 200
@@ -297,12 +388,25 @@ class CameraManager(
                     message = "Failed to disable auto controls: ${e.message ?: "unknown"}"
                 )
             } else {
-                Log.i(TAG, "Camera2 interop: AF, AE, AWB all set to OFF")
+                val awbLabel = when (currentAwbMode) {
+                    CameraMetadata.CONTROL_AWB_MODE_AUTO             -> "AUTO"
+                    CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT      -> "Tungsten"
+                    CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT       -> "Fluor."
+                    CameraMetadata.CONTROL_AWB_MODE_WARM_FLUORESCENT  -> "Warm Fl."
+                    CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT          -> "Sunny"
+                    CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT   -> "Cloudy"
+                    CameraMetadata.CONTROL_AWB_MODE_TWILIGHT          -> "Twilight"
+                    CameraMetadata.CONTROL_AWB_MODE_SHADE             -> "Shade"
+                    CameraMetadata.CONTROL_AWB_MODE_OFF               -> "OFF"
+                    else -> "mode $currentAwbMode"
+                }
+                Log.i(TAG, "Camera2 interop: AF=OFF, AE=OFF, AWB=$awbLabel")
                 pushEvent(
                     type = "status",
                     tag = "cameraSettings",
-                    message = "AF: OFF | AE: OFF | AWB: OFF",
-                    data = mapOf("afEnabled" to false, "aeEnabled" to false, "awbEnabled" to false)
+                    message = "AF: OFF | AE: OFF | AWB: $awbLabel",
+                    data = mapOf("afEnabled" to false, "aeEnabled" to false,
+                                 "awbMode" to currentAwbMode)
                 )
             }
         }
@@ -325,32 +429,31 @@ class CameraManager(
             .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, storedExposureTimeNs)
             .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY,   storedSensitivityIso)
 
-        val awbMode = if (isAwbEnabled) CameraMetadata.CONTROL_AWB_MODE_AUTO
-                      else             CameraMetadata.CONTROL_AWB_MODE_OFF
-        builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, awbMode)
-
-        // Manual color correction is only active when AWB is OFF.
-        // Per the Camera2 docs, COLOR_CORRECTION_GAINS are applied by the app ONLY
-        // when COLOR_CORRECTION_MODE = TRANSFORM_MATRIX; in any other mode, the
-        // camera device ignores the app-supplied gains and sets its own.
-        // COLOR_CORRECTION_TRANSFORM must also be provided when using
-        // TRANSFORM_MATRIX mode — we supply an identity matrix so the sensor's
-        // native colour space is unchanged, and all WB is done via GAINS alone.
-        if (!isAwbEnabled) {
-            val gains = kelvinToRggbGains(colorTemperatureK)
+        // AWB: set selected preset mode.
+        // For any mode other than OFF, the camera's 3A handles white balance —
+        // we must NOT set COLOR_CORRECTION_MODE = TRANSFORM_MATRIX, which would
+        // override the preset with our manual gains.
+        // OFF mode requires explicit gains + transform (manual override).
+        builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, currentAwbMode)
+        if (currentAwbMode == CameraMetadata.CONTROL_AWB_MODE_OFF) {
+            // Manual WB: neutral gains + device-calibrated (or static) CCM.
+            val gains = RggbChannelVector(1.0f, 1.0f, 1.0f, 1.0f)
+            val ccm = capturedColorTransform
+                ?: staticColorTransform
+                ?: IDENTITY_COLOR_TRANSFORM
+            val ccmLabel = when {
+                capturedColorTransform != null -> "live-AWB"
+                staticColorTransform  != null -> "static-chars"
+                else                          -> "identity"
+            }
+            Log.d(TAG, "AWB OFF — CCM source: $ccmLabel")
             builder
                 .setCaptureRequestOption(
                     CaptureRequest.COLOR_CORRECTION_MODE,
                     CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
                 )
-                .setCaptureRequestOption(
-                    CaptureRequest.COLOR_CORRECTION_TRANSFORM,
-                    IDENTITY_COLOR_TRANSFORM
-                )
-                .setCaptureRequestOption(
-                    CaptureRequest.COLOR_CORRECTION_GAINS,
-                    gains
-                )
+                .setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_TRANSFORM, ccm)
+                .setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_GAINS, gains)
         }
 
         val future = camera2Control.setCaptureRequestOptions(builder.build())
@@ -611,110 +714,74 @@ class CameraManager(
         }
     }
 
-    // ── Manual color temperature ────────────────────────────────────────
+    // ── White balance preset control ─────────────────────────────────────
 
     /**
-     * Convert a color temperature in Kelvin to per-channel RGGB gains.
+     * Set one of the Camera2 CONTROL_AWB_MODE_* presets at runtime.
      *
-     * Uses the Tanner-Helland blackbody approximation to get the natural R:G:B
-     * ratios of a blackbody at that temperature, then applies them DIRECTLY
-     * as sensor gains (colorimetric tint, not AWB compensation):
-     *   - Low K  (2000K) → strong red/orange boost, blue cut  → warm image
-     *   - High K (10000K) → blue boost, red cut                → cool/blue image
-     * Green is kept at 1.0 as the reference channel.
+     * Supported mode constants (CameraMetadata):
+     *   0  OFF              – manual (neutral 1.0 gains + live CCM applied)
+     *   1  AUTO             – full auto white balance
+     *   2  INCANDESCENT     – tungsten / candlelight (~2700 K)
+     *   3  FLUORESCENT      – cool white fluorescent (~4000 K)
+     *   4  WARM_FLUORESCENT – warm white fluorescent (~3000 K)
+     *   5  DAYLIGHT         – direct sunlight (~5500 K)
+     *   6  CLOUDY_DAYLIGHT  – overcast sky (~6500 K)
+     *   7  TWILIGHT         – sunset / sunrise (~8000 K)
+     *   8  SHADE            – open shade (~7000 K)
      *
-     * References: Tanner-Helland algorithm; validated against
-     * https://andi-siess.de/rgb-to-color-temperature/ (Siess 2024)
+     * For preset modes (≠ OFF) the camera's 3A handles all color correction;
+     * we must NOT set COLOR_CORRECTION_MODE = TRANSFORM_MATRIX, which would
+     * override the preset with manual gains.
      */
-    private fun kelvinToRggbGains(kelvin: Int): RggbChannelVector {
-        val temp = kelvin.coerceIn(1000, 20000).toFloat() / 100f
-
-        // Natural red luminance for this temperature (Tanner-Helland)
-        val red = if (temp <= 66f) 255f
-        else (329.698727446f * (temp - 60f).pow(-0.1332047592f)).coerceIn(1f, 255f)
-
-        // Natural green luminance
-        val green = if (temp <= 66f) {
-            (99.4708025861f * ln(temp) - 161.1195681661f).coerceIn(1f, 255f)
-        } else {
-            (288.1221695283f * (temp - 60f).pow(-0.0755148492f)).coerceIn(1f, 255f)
-        }
-
-        // Natural blue luminance
-        val blue = when {
-            temp >= 66f -> 255f
-            temp <= 19f -> 1f
-            else -> (138.5177312231f * ln(temp - 10f) - 305.0447927307f).coerceIn(1f, 255f)
-        }
-
-        // Direct tint: apply the blackbody ratios as sensor gains, normalised
-        // to green = 1.0. At 2000K: R≈1.85, B≈0.13 (warm). At 10000K: R≈0.95, B≈1.17 (cool).
-        val rGain = (red / green).coerceIn(0.1f, 4.0f)
-        val bGain = (blue / green).coerceIn(0.1f, 4.0f)
-        return RggbChannelVector(rGain, 1.0f, 1.0f, bGain)
-    }
-
-    /**
-     * Apply a manual color temperature (in Kelvin) via COLOR_CORRECTION_GAINS.
-     * AWB will be forced OFF. Writes the FULL capture option set so that
-     * AE=OFF / AF=OFF / exposure / sensitivity are preserved alongside the gains.
-     */
-    fun setColorTemperature(kelvin: Int, callback: (Exception?) -> Unit) {
+    fun setWhiteBalancePreset(mode: Int, callback: (Exception?) -> Unit) {
         val cam = camera
         if (cam == null) {
             callback(IllegalStateException("Camera not ready"))
             return
         }
-
-        val gains = kelvinToRggbGains(kelvin)
-        Log.i(TAG, "Setting color temperature: ${kelvin}K → gains R=${"%.3f".format(gains.red)} G=${"%.3f".format(gains.greenEven)} B=${"%.3f".format(gains.blue)}")
-
-        // Commit the desired temperature into state; isAwbEnabled stays as-is
-        // (caller already guards against calling this when AWB is ON).
-        colorTemperatureK = kelvin
-        isAwbEnabled = false  // gains only apply when AWB is OFF
-
+        val previousMode = currentAwbMode
+        currentAwbMode = mode
         applyAllCaptureOptions(cam) { e ->
             if (e != null) {
-                Log.e(TAG, "Failed to set color temperature", e)
+                Log.e(TAG, "Failed to set WB preset $mode", e)
+                currentAwbMode = previousMode
                 callback(e)
             } else {
-                Log.i(TAG, "Color temperature set to ${kelvin}K")
+                val label = when (mode) {
+                    CameraMetadata.CONTROL_AWB_MODE_AUTO             -> "AUTO"
+                    CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT      -> "Tungsten"
+                    CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT       -> "Fluor."
+                    CameraMetadata.CONTROL_AWB_MODE_WARM_FLUORESCENT  -> "Warm Fl."
+                    CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT          -> "Sunny"
+                    CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT   -> "Cloudy"
+                    CameraMetadata.CONTROL_AWB_MODE_TWILIGHT          -> "Twilight"
+                    CameraMetadata.CONTROL_AWB_MODE_SHADE             -> "Shade"
+                    CameraMetadata.CONTROL_AWB_MODE_OFF               -> "OFF"
+                    else -> "mode $mode"
+                }
+                Log.i(TAG, "WB preset set to $label (mode $mode)")
+                pushEvent(
+                    type = "status",
+                    tag = "whiteBalance",
+                    message = "AF: OFF | AE: OFF | AWB: $label",
+                    data = mapOf("awbMode" to mode)
+                )
                 callback(null)
             }
         }
     }
 
-    // ── AWB toggle ──────────────────────────────────────────────────────
-
     /**
-     * Toggle auto-white-balance between OFF and AUTO.
-     * Returns the new AWB state (true = AUTO, false = OFF).
+     * Query which AWB mode constants the device hardware supports.
+     * Returns an empty list if the camera is not yet started.
      */
-    fun toggleAwb(callback: (Boolean?, Exception?) -> Unit) {
-        val cam = camera
-        if (cam == null) {
-            callback(null, IllegalStateException("Camera not ready"))
-            return
-        }
-
-        // Capture the before/after states as locals so that rapid successive
-        // calls cannot corrupt each other's callbacks via isAwbEnabled mutations.
-        val previousEnabled = isAwbEnabled
-        val desiredEnabled = !previousEnabled
-        isAwbEnabled = desiredEnabled  // optimistic — reverted on error
-
-        applyAllCaptureOptions(cam) { e ->
-            if (e != null) {
-                Log.e(TAG, "Failed to toggle AWB", e)
-                isAwbEnabled = previousEnabled  // revert
-                callback(null, e)
-            } else {
-                val label = if (desiredEnabled) "AUTO" else "OFF"
-                Log.i(TAG, "AWB set to $label")
-                callback(desiredEnabled, null)
-            }
-        }
+    @OptIn(ExperimentalCamera2Interop::class)
+    fun getAvailableWhiteBalanceModes(): List<Int> {
+        val cam = camera ?: return emptyList()
+        return Camera2CameraInfo.from(cam.cameraInfo)
+            .getCameraCharacteristic(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
+            ?.toList() ?: listOf(CameraMetadata.CONTROL_AWB_MODE_AUTO)
     }
 
     /** Get current resolution info as a map. */
@@ -728,8 +795,7 @@ class CameraManager(
             result["analysisWidth"] = it.width
             result["analysisHeight"] = it.height
         }
-        result["awbEnabled"] = isAwbEnabled
-        result["colorTemperatureK"] = colorTemperatureK
+        result["currentAwbMode"] = currentAwbMode
         return result
     }
 }

@@ -97,13 +97,23 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "toggleAwb" -> {
-                        manager.toggleAwb { enabled, error ->
+                        // Legacy — kept for backward compat; no-ops now.
+                        result.success(false)
+                    }
+
+                    "setWhiteBalancePreset" -> {
+                        val mode = call.argument<Int>("mode") ?: 1
+                        manager.setWhiteBalancePreset(mode) { error ->
                             if (error != null) {
-                                result.error("AWB_FAILED", error.message, null)
+                                result.error("WB_PRESET_FAILED", error.message, null)
                             } else {
-                                result.success(enabled)
+                                result.success(null)
                             }
                         }
+                    }
+
+                    "getAvailableWhiteBalanceModes" -> {
+                        result.success(manager.getAvailableWhiteBalanceModes())
                     }
 
                     "getResolution" -> {
@@ -111,14 +121,8 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "setColorTemperature" -> {
-                        val kelvin = call.argument<Int>("kelvin") ?: 5500
-                        manager.setColorTemperature(kelvin) { error ->
-                            if (error != null) {
-                                result.error("SET_TEMP_FAILED", error.message, null)
-                            } else {
-                                result.success(null)
-                            }
-                        }
+                        // Legacy — no longer supported; use setWhiteBalancePreset.
+                        result.error("DEPRECATED", "Use setWhiteBalancePreset", null)
                     }
 
                     else -> result.notImplemented()

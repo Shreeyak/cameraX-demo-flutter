@@ -1,8 +1,7 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
+import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
 import 'package:flutter/services.dart';
 
 Future<void> main() async {
@@ -62,12 +61,26 @@ class CameraControl {
   }
 
   /// Toggle AWB between OFF and AUTO. Returns new state (true = AUTO).
+  /// @deprecated Use setWhiteBalancePreset instead.
   static Future<bool> toggleAwb() async {
     final enabled = await _method.invokeMethod<bool>('toggleAwb');
     return enabled ?? false;
   }
 
-  /// Set a manual color temperature in Kelvin (AWB must be OFF).
+  /// Set a Camera2 CONTROL_AWB_MODE_* preset (mode int constant).
+  static Future<void> setWhiteBalancePreset(int mode) =>
+      _method.invokeMethod('setWhiteBalancePreset', {'mode': mode});
+
+  /// Returns the list of AWB mode ints this device supports.
+  /// Empty list if camera not yet started.
+  static Future<List<int>> getAvailableWhiteBalanceModes() async {
+    final result = await _method.invokeMethod<List>(
+      'getAvailableWhiteBalanceModes',
+    );
+    return result?.cast<int>() ?? [1];
+  }
+
+  /// @deprecated Use setWhiteBalancePreset instead.
   static Future<void> setColorTemperature(int kelvin) =>
       _method.invokeMethod('setColorTemperature', {'kelvin': kelvin});
 
@@ -103,11 +116,11 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _permissionGranted = false;
   bool _cameraStarted = false;
   bool _saving = false;
-  bool _awbEnabled = false;
-  bool _awbPending = false; // true while a toggleAwb call is in flight
-  int _colorTempK = 5500; // current manual color temperature (Kelvin)
-  bool _tempPending =
-      false; // true while a setColorTemperature request is in flight
+  // WB preset selection
+  int _selectedWbMode = 1; // AUTO by default
+  bool _wbPending = false;
+  List<int> _availableWbModes = []; // populated after camera starts
+  bool _isAwbDrawerOpen = false;
   String _captureResolution = '--';
   String _analysisResolution = '--';
   String _statusText = 'Initializing...';
@@ -153,9 +166,14 @@ class _CameraScreenState extends State<CameraScreen> {
         final ah = info['analysisHeight'] ?? '--';
         _captureResolution = '${cw}x$ch';
         _analysisResolution = '${aw}x$ah';
-        // Optimistic default assuming defaults; confirmed state arrives via event stream.
-        _statusText = 'AF: ON | AE: ON | AWB: ON';
+        _statusText = 'AF: ON | AE: ON | AWB: AUTO';
       });
+
+      // Fetch supported WB modes and update the preset bar
+      final modes = await CameraControl.getAvailableWhiteBalanceModes();
+      if (mounted && modes.isNotEmpty) {
+        setState(() => _availableWbModes = modes);
+      }
 
       // Start listening to analysis frames and Kotlin events
       _listenToFrames();
@@ -249,54 +267,27 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  Future<void> _toggleAwb() async {
-    // Ignore taps while a previous request is still in flight.
-    if (_awbPending) return;
-    setState(() => _awbPending = true);
+  Future<void> _setWbPreset(int mode) async {
+    if (_wbPending) return;
+    final previousMode = _selectedWbMode;
+    setState(() {
+      _wbPending = true;
+      _selectedWbMode = mode; // optimistic UI update
+    });
     try {
-      final enabled = await CameraControl.toggleAwb();
-      if (!mounted) return;
-      setState(() {
-        _awbEnabled = enabled;
-        final awbLabel = enabled ? 'AUTO' : 'OFF';
-        _statusText = 'AF: OFF | AE: OFF | AWB: $awbLabel';
-      });
+      await CameraControl.setWhiteBalancePreset(mode);
     } catch (e) {
+      // Revert optimistic update on failure
       if (!mounted) return;
+      setState(() => _selectedWbMode = previousMode);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('AWB toggle failed: $e'),
+          content: Text('WB preset failed: $e'),
           backgroundColor: Colors.red,
         ),
       );
     } finally {
-      if (mounted) setState(() => _awbPending = false);
-    }
-  }
-
-  /// Set manual color temperature. Updates the UI immediately (optimistic) and
-  /// sends requests to the camera, looping until the latest value is applied.
-  Future<void> _setColorTemperature(int kelvin) async {
-    if (_awbEnabled) return; // AWB must be OFF for manual temperature
-    // Immediate UI feedback — do not wait for the camera round-trip.
-    setState(() => _colorTempK = kelvin);
-    // Gate actual camera requests: if one is already in flight, the while-loop
-    // below will catch any value changes that happen while we wait.
-    if (_tempPending) return;
-    setState(() => _tempPending = true);
-    try {
-      while (true) {
-        final targetK = _colorTempK;
-        await CameraControl.setColorTemperature(targetK);
-        if (!mounted) return;
-        // If the user kept dragging while we waited, apply the new value.
-        if (_colorTempK == targetK) break;
-      }
-    } catch (e) {
-      if (!mounted) return;
-      debugPrint('Set color temperature failed: $e');
-    } finally {
-      if (mounted) setState(() => _tempPending = false);
+      if (mounted) setState(() => _wbPending = false);
     }
   }
 
@@ -343,6 +334,9 @@ class _CameraScreenState extends State<CameraScreen> {
           // ── Right-edge toolbar ──
           Positioned(right: 0, top: 0, bottom: 0, child: _buildToolbar()),
 
+          // ── Left-edge AWB drawer ──
+          Positioned(left: 0, top: 0, bottom: 0, child: _buildLeftBar()),
+
           // ── Bottom overlay ──
           Positioned(left: 0, right: 0, bottom: 0, child: _buildBottomBar()),
         ],
@@ -350,32 +344,144 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  /// Right-edge vertical toolbar with toggle buttons.
-  Widget _buildToolbar() {
-    return SafeArea(
-      child: Center(
-        child: Container(
-          width: 56,
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.6),
-            borderRadius: const BorderRadius.only(
-              topLeft: Radius.circular(8),
-              bottomLeft: Radius.circular(8),
-            ),
+  /// Right-edge vertical toolbar. Currently empty; reserved for future buttons.
+  Widget _buildToolbar() => const SizedBox.shrink();
+
+  Widget _buildLeftBar() {
+    if (!_cameraStarted) return const SizedBox.shrink();
+
+    final selectedPreset = _kWbPresets.firstWhere(
+      (p) => p.mode == _selectedWbMode,
+      orElse: () => _kWbPresets.first,
+    );
+
+    final visiblePresets = _availableWbModes.isEmpty
+        ? _kWbPresets
+        : _kWbPresets.where((p) => _availableWbModes.contains(p.mode)).toList();
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        width: _isAwbDrawerOpen ? null : 65,
+        margin: EdgeInsets.zero,
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(
+            alpha: 0.8, // Decreased transparency
           ),
-          child: Column(
+          border: const Border(
+            right: BorderSide(color: Colors.white24, width: 0.5),
+          ),
+        ),
+        child: SafeArea(
+          child: Row(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment:
+                CrossAxisAlignment.end, // Align groups to bottom
             children: [
-              // AWB toggle
-              _ToolbarButton(
-                icon: Icons.wb_auto,
-                label: 'AWB',
-                isActive: _awbEnabled,
-                isPending: _awbPending,
-                onTap: _toggleAwb,
+              // AWB Button (Main toggler)
+              SizedBox(
+                width: 64, // Fixed width, accounts for 0.5px border
+                child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        _isAwbDrawerOpen = !_isAwbDrawerOpen;
+                      });
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 24),
+                      color: Colors.transparent, // Ensure gesture hits
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            selectedPreset.icon,
+                            size: 24,
+                            color: Colors.blueAccent,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            selectedPreset.label,
+                            style: const TextStyle(
+                              color: Colors.blueAccent,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 4),
+                          Container(
+                            width: 16,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: selectedPreset.indicatorColor,
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          const Text(
+                            'WB', // Text below the icon
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              // Future buttons go here (AF, AE, zoom, etc.)
+              ),
+
+              // The Expanded Drawer
+              if (_isAwbDrawerOpen) ...[
+                Container(
+                  width: 1,
+                  height: 140, // Height to accommodate 2 rows
+                  color: Colors.white24,
+                  margin: const EdgeInsets.only(bottom: 12),
+                ),
+                // Preset list
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Center(
+                        child: Wrap(
+                          direction: Axis.vertical,
+                          spacing: 8, // space between rows vertically
+                          runSpacing: 8, // space between columns horizontally
+                          children: visiblePresets.map((preset) {
+                            final isSelected = preset.mode == _selectedWbMode;
+                            return _WbChip(
+                              preset: preset,
+                              isSelected: isSelected,
+                              isPending: _wbPending && isSelected,
+                              onTap: () {
+                                _setWbPreset(preset.mode);
+                                setState(() {
+                                  _isAwbDrawerOpen = false;
+                                });
+                              },
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -394,30 +500,6 @@ class _CameraScreenState extends State<CameraScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // ── Color temperature slider (visible when camera is running) ──
-            if (_cameraStarted) ...[
-              Row(
-                children: [
-                  const Icon(Icons.thermostat, size: 14, color: Colors.white54),
-                  const SizedBox(width: 4),
-                  Text(
-                    'Color Temp${_awbEnabled ? ' (AWB ON)' : ''}',
-                    style: TextStyle(
-                      color: _awbEnabled ? Colors.white38 : Colors.white70,
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              _TemperatureSlider(
-                value: _colorTempK,
-                enabled: !_awbEnabled,
-                onChanged: _setColorTemperature,
-              ),
-              const SizedBox(height: 10),
-            ],
-
             // ── Thumbnail + info + save ──
             Row(
               children: [
@@ -522,54 +604,95 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 }
 
-// ── Reusable toolbar button widget ──────────────────────────────────────
+// ── White balance preset bar ─────────────────────────────────────────
 
-class _ToolbarButton extends StatelessWidget {
-  final IconData icon;
+/// Preset descriptor — mode value matches CameraMetadata.CONTROL_AWB_MODE_*
+class _WbPreset {
+  const _WbPreset(this.label, this.mode, this.icon, this.indicatorColor);
   final String label;
-  final bool isActive;
+  final int mode;
+  final IconData icon;
 
-  /// When true the button is visually dimmed and taps are ignored.
+  /// Small color dot shown below the label to hint at the light color.
+  final Color indicatorColor;
+}
+
+// Ordered based on user request: auto, tungsten, warm fl, fluor, sunny, cloudy, twilight, shade.
+// Inverted colors: Tungsten (blue) to Shade (orange).
+const _kWbPresets = [
+  _WbPreset('Auto', 1, Icons.wb_auto, Color(0xFFFFFFFF)),
+  _WbPreset('Tungsten', 2, Icons.wb_incandescent, Color(0xFF99AAFF)), // Blue
+  _WbPreset('Warm Fl.', 4, Icons.light_mode, Color(0xFFBBCCFF)), // Light blue
+  _WbPreset('Fluor.', 3, Icons.fluorescent, Color(0xFFDDEEFF)), // Pale blue
+  _WbPreset('Sunny', 5, Icons.wb_sunny, Color(0xFFFFF5C0)), // Middle pale
+  _WbPreset('Cloudy', 6, Icons.wb_cloudy, Color(0xFFFFFFAA)), // Yellowish
+  _WbPreset(
+    'Twilight',
+    7,
+    Icons.nights_stay,
+    Color(0xFFFFCC66),
+  ), // Light Orange
+  _WbPreset('Shade', 8, Icons.filter_drama, Color(0xFFFF8800)), // Orange
+];
+
+class _WbChip extends StatelessWidget {
+  const _WbChip({
+    required this.preset,
+    required this.isSelected,
+    required this.isPending,
+    required this.onTap,
+  });
+
+  final _WbPreset preset;
+  final bool isSelected;
   final bool isPending;
   final VoidCallback onTap;
 
-  const _ToolbarButton({
-    required this.icon,
-    required this.label,
-    required this.isActive,
-    required this.onTap,
-    this.isPending = false,
-  });
-
   @override
   Widget build(BuildContext context) {
-    final color = isPending
-        ? Colors.grey
-        : (isActive ? Colors.greenAccent : Colors.redAccent);
+    final color = isSelected ? Colors.blueAccent : Colors.white38;
     return GestureDetector(
       onTap: isPending ? null : onTap,
-      child: Opacity(
-        opacity: isPending ? 0.4 : 1.0,
-        child: Container(
-          width: 48,
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          decoration: BoxDecoration(
-            color: isActive && !isPending
-                ? Colors.green.withValues(alpha: 0.2)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: 60,
+        decoration: BoxDecoration(
+          color: isSelected
+              ? Colors.blueAccent.withValues(alpha: 0.25)
+              : Colors.white.withValues(alpha: 0.04),
+          border: Border.all(
+            color: isSelected ? Colors.blueAccent : Colors.white24,
+            width: isSelected ? 1.5 : 0.5,
           ),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Opacity(
+          opacity: isPending ? 0.5 : 1.0,
           child: Column(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon, size: 28, color: color),
+              Icon(preset.icon, size: 18, color: color),
               const SizedBox(height: 2),
               Text(
-                label,
+                preset.label,
                 style: TextStyle(
-                  fontSize: 9,
-                  fontWeight: FontWeight.bold,
                   color: color,
+                  fontSize: 9,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 3),
+              Container(
+                width: 10,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: preset.indicatorColor.withValues(
+                    alpha: isSelected ? 1.0 : 0.45,
+                  ),
+                  borderRadius: BorderRadius.circular(2),
                 ),
               ),
             ],
@@ -578,213 +701,4 @@ class _ToolbarButton extends StatelessWidget {
       ),
     );
   }
-}
-// ── Temperature slider ─────────────────────────────────────────────────
-
-/// A horizontal touch-controlled color-temperature slider.
-///
-/// Displays a warm→cool gradient strip with tick marks at every [step] Kelvin
-/// and labels at every 1000 K. The user can tap or drag anywhere on the strip
-/// to set the value; the current position is shown by a white marker line.
-class _TemperatureSlider extends StatefulWidget {
-  const _TemperatureSlider({
-    required this.value,
-    required this.onChanged,
-    this.enabled = true,
-  });
-
-  final int value;
-  final ValueChanged<int> onChanged;
-  final bool enabled;
-
-  static const int kMin = 2000;
-  static const int kMax = 10000;
-  static const int kStep = 250;
-
-  @override
-  State<_TemperatureSlider> createState() => _TemperatureSliderState();
-}
-
-class _TemperatureSliderState extends State<_TemperatureSlider> {
-  double? _dragStartX;
-  int? _dragStartValue;
-
-  int _snap(double rawK) {
-    const min = _TemperatureSlider.kMin;
-    const max = _TemperatureSlider.kMax;
-    const step = _TemperatureSlider.kStep;
-    final snapped = ((rawK - min) / step).round() * step + min;
-    return snapped.clamp(min, max);
-  }
-
-  void _onPanStart(DragStartDetails d) {
-    _dragStartX = d.localPosition.dx;
-    _dragStartValue = widget.value;
-  }
-
-  void _onPanUpdate(DragUpdateDetails d, double width) {
-    if (_dragStartX == null || _dragStartValue == null) return;
-    final dx = d.localPosition.dx - _dragStartX!;
-    final deltaK =
-        (dx / width) * (_TemperatureSlider.kMax - _TemperatureSlider.kMin);
-    widget.onChanged(_snap(_dragStartValue! + deltaK));
-  }
-
-  void _onTapDown(TapDownDetails d, double width) {
-    final frac = (d.localPosition.dx / width).clamp(0.0, 1.0);
-    widget.onChanged(
-      _snap(
-        _TemperatureSlider.kMin +
-            frac * (_TemperatureSlider.kMax - _TemperatureSlider.kMin),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final w = constraints.maxWidth;
-        return Opacity(
-          opacity: widget.enabled ? 1.0 : 0.35,
-          child: GestureDetector(
-            onPanStart: widget.enabled ? _onPanStart : null,
-            onPanUpdate: widget.enabled ? (d) => _onPanUpdate(d, w) : null,
-            onTapDown: widget.enabled ? (d) => _onTapDown(d, w) : null,
-            child: CustomPaint(
-              size: Size(w, 72),
-              painter: _TemperatureScalePainter(value: widget.value),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-// ── Temperature scale painter ──────────────────────────────────────────
-
-class _TemperatureScalePainter extends CustomPainter {
-  const _TemperatureScalePainter({required this.value});
-
-  final int value;
-
-  static const _min = _TemperatureSlider.kMin;
-  static const _max = _TemperatureSlider.kMax;
-  static const _step = _TemperatureSlider.kStep;
-
-  // Warm-to-cool gradient stops matching the 2000–10000 K range.
-  static const _gradientColors = [
-    Color(0xFFFF4500), // 2000 K – deep orange
-    Color(0xFFFFAA00), // 3000 K – amber
-    Color(0xFFFFE4B0), // 4000 K – warm yellow-white
-    Color(0xFFFFFFFF), // 5500 K – neutral white
-    Color(0xFFD0E8FF), // 6500 K – slightly blue
-    Color(0xFF90B8FF), // 8000 K – cool blue
-    Color(0xFF5888F5), // 10000 K – deep blue
-  ];
-  // stops = (K - 2000) / (10000 - 2000)
-  static const _gradientStops = [0.0, 0.125, 0.25, 0.4375, 0.5625, 0.75, 1.0];
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final double range = (_max - _min).toDouble();
-    final rrect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(0, 0, size.width, size.height),
-      const Radius.circular(10),
-    );
-
-    // ── Gradient background ──
-    final gradient = const LinearGradient(
-      colors: _gradientColors,
-      stops: _gradientStops,
-    );
-    canvas.drawRRect(
-      rrect,
-      Paint()
-        ..shader = gradient.createShader(
-          Rect.fromLTWH(0, 0, size.width, size.height),
-        ),
-    );
-    // Darken overlay for tick/label contrast
-    canvas.drawRRect(rrect, Paint()..color = const Color(0x40000000));
-
-    // ── Tick marks ──
-    final tickPaint = Paint()
-      ..color = const Color(0xBFFFFFFF)
-      ..strokeWidth = 1.0;
-    final tp = TextPainter(textDirection: TextDirection.ltr);
-
-    for (int k = _min; k <= _max; k += _step) {
-      final x = (k - _min) / range * size.width;
-      final isMajor = k % 1000 == 0;
-      final tickTop = size.height - (isMajor ? 22.0 : 11.0);
-      canvas.drawLine(Offset(x, tickTop), Offset(x, size.height), tickPaint);
-
-      if (isMajor) {
-        tp.text = TextSpan(
-          text: '${k ~/ 1000}K',
-          style: const TextStyle(
-            color: Color(0xFFFFFFFF),
-            fontSize: 9,
-            fontWeight: FontWeight.w600,
-            shadows: [Shadow(blurRadius: 2, color: Color(0x88000000))],
-          ),
-        );
-        tp.layout();
-        final lx = (x - tp.width / 2).clamp(0.0, size.width - tp.width);
-        tp.paint(canvas, Offset(lx, tickTop - tp.height - 1));
-      }
-    }
-
-    // ── Current value indicator line ──
-    final cx = (value - _min) / range * size.width;
-    canvas.drawLine(
-      Offset(cx, 0),
-      Offset(cx, size.height),
-      Paint()
-        ..color = const Color(0xFFFFFFFF)
-        ..strokeWidth = 2.5,
-    );
-
-    // Triangle pointer at top of indicator
-    final tri = Path()
-      ..moveTo(cx - 6, 0)
-      ..lineTo(cx + 6, 0)
-      ..lineTo(cx, 9)
-      ..close();
-    canvas.drawPath(tri, Paint()..color = const Color(0xFFFFFFFF));
-    canvas.drawPath(
-      tri,
-      Paint()
-        ..color = const Color(0x66000000)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 0.5,
-    );
-
-    // ── Value label pill ──
-    tp.text = TextSpan(
-      text: '${value}K',
-      style: const TextStyle(
-        color: Color(0xFFFFFFFF),
-        fontSize: 11,
-        fontWeight: FontWeight.bold,
-        shadows: [Shadow(blurRadius: 3, color: Color(0xFF000000))],
-      ),
-    );
-    tp.layout();
-    final pillW = tp.width + 10;
-    final pillX = (cx - pillW / 2).clamp(0.0, size.width - pillW);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(pillX, 10, pillW, 18),
-        const Radius.circular(4),
-      ),
-      Paint()..color = const Color(0x88000000),
-    );
-    tp.paint(canvas, Offset(pillX + 5, 13));
-  }
-
-  @override
-  bool shouldRepaint(_TemperatureScalePainter old) => old.value != value;
 }
