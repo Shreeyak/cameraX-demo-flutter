@@ -1,6 +1,6 @@
-# camera_x_demo
+# cameraX-demo-flutter
 
-A new Flutter project.
+CameraX demo Flutter app.
 
 ## Getting Started
 

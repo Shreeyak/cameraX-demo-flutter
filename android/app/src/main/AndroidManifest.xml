@@ -6,7 +6,7 @@
     <uses-feature android:name="android.hardware.camera" android:required="true" />
 
     <application
-        android:label="camera_x_demo"
+        android:label="cameraX-demo-flutter"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
 

@@ -1,4 +1,4 @@
-package com.example.camera_x_demo
+package com.example.camerax_demo_flutter
 
 import android.Manifest
 import android.content.ContentValues
@@ -35,7 +35,7 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
-import com.example.camera_x_demo.databinding.ActivityCameraBinding
+import com.example.camerax_demo_flutter.databinding.ActivityCameraBinding
 import java.io.ByteArrayInputStream
 import java.text.SimpleDateFormat
 import java.util.Locale

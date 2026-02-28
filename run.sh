@@ -10,7 +10,7 @@ echo "▸ Installing on device…"
 adb install -r build/app/outputs/flutter-apk/app-debug.apk
 
 echo "▸ Launching CameraActivity…"
-adb shell am start -n com.example.camera_x_demo/.CameraActivity
+adb shell am start -n com.example.camerax_demo_flutter/.CameraActivity
 
 echo "▸ Streaming logs (CameraXDemo tag)… Press Ctrl+C to stop."
 adb logcat -s CameraXDemo:I -v time
