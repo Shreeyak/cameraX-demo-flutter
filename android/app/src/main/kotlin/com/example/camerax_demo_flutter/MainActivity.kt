@@ -23,12 +23,14 @@ class MainActivity : FlutterActivity() {
         private const val TAG = "CameraXDemo"
         private const val METHOD_CHANNEL = "com.example.camerax/control"
         private const val EVENT_CHANNEL = "com.example.camerax/frames"
+        private const val EVENTS_CHANNEL = "com.example.camerax/kotlinEvents"
         private const val CAMERA_PERMISSION_CODE = 1001
     }
 
     private var cameraManager: CameraManager? = null
     private var methodChannel: MethodChannel? = null
     private var eventChannel: EventChannel? = null
+    private var eventsChannel: EventChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -130,6 +132,24 @@ class MainActivity : FlutterActivity() {
                 }
             })
         }
+
+        // ── EventChannel for generic Kotlin events (status/warnings/errors) ──
+        eventsChannel = EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            EVENTS_CHANNEL
+        ).also { channel ->
+            channel.setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    Log.i(TAG, "Events stream: Dart listener attached")
+                    manager.setEventSink(events)
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    Log.i(TAG, "Events stream: Dart listener detached")
+                    manager.setEventSink(null)
+                }
+            })
+        }
     }
 
     // ── Permission handling ─────────────────────────────────────────────
@@ -154,6 +174,7 @@ class MainActivity : FlutterActivity() {
         cameraManager = null
         methodChannel?.setMethodCallHandler(null)
         eventChannel?.setStreamHandler(null)
+        eventsChannel?.setStreamHandler(null)
         super.onDestroy()
     }
 }

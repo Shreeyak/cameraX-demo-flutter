@@ -38,6 +38,7 @@ class CameraXDemoApp extends StatelessWidget {
 class CameraControl {
   static const _method = MethodChannel('com.example.camerax/control');
   static const _frames = EventChannel('com.example.camerax/frames');
+  static const _events = EventChannel('com.example.camerax/kotlinEvents');
 
   /// Request camera permission. Returns true if granted.
   static Future<bool> requestPermission() async {
@@ -76,6 +77,13 @@ class CameraControl {
   static Stream<Map<dynamic, dynamic>> get frameStream => _frames
       .receiveBroadcastStream()
       .map((event) => event as Map<dynamic, dynamic>);
+
+  /// Stream of generic events from Kotlin: status updates, warnings, errors.
+  /// Each event map contains: 'type' ("status"|"warning"|"error"),
+  /// 'tag' (source identifier), 'message' (string), and optional 'data' (map).
+  static Stream<Map<dynamic, dynamic>> get eventStream => _events
+      .receiveBroadcastStream()
+      .map((event) => event as Map<dynamic, dynamic>);
 }
 
 // ── Camera screen ───────────────────────────────────────────────────────
@@ -92,6 +100,7 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _cameraStarted = false;
   bool _saving = false;
   bool _awbEnabled = false;
+  bool _awbPending = false; // true while a toggleAwb call is in flight
   String _captureResolution = '--';
   String _analysisResolution = '--';
   String _statusText = 'Initializing...';
@@ -99,6 +108,7 @@ class _CameraScreenState extends State<CameraScreen> {
   // Analysis frame thumbnail
   Uint8List? _thumbnailBytes;
   StreamSubscription<Map<dynamic, dynamic>>? _frameSub;
+  StreamSubscription<Map<dynamic, dynamic>>? _eventSub;
 
   @override
   void initState() {
@@ -136,11 +146,13 @@ class _CameraScreenState extends State<CameraScreen> {
         final ah = info['analysisHeight'] ?? '--';
         _captureResolution = '${cw}x$ch';
         _analysisResolution = '${aw}x$ah';
-        _statusText = 'AF: OFF | AE: OFF | AWB: OFF';
+        // Optimistic default assuming defaults; confirmed state arrives via event stream.
+        _statusText = 'AF: ON | AE: ON | AWB: ON';
       });
 
-      // Start listening to analysis frames
+      // Start listening to analysis frames and Kotlin events
       _listenToFrames();
+      _listenToEvents();
     } catch (e) {
       if (!mounted) return;
       setState(() => _statusText = 'Camera error: $e');
@@ -165,9 +177,45 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
+  void _listenToEvents() {
+    _eventSub = CameraControl.eventStream.listen(
+      (event) {
+        if (!mounted) return;
+        final type = event['type'] as String? ?? 'status';
+        final message = event['message'] as String? ?? '';
+
+        switch (type) {
+          case 'status':
+            setState(() => _statusText = message);
+          case 'warning':
+            setState(() => _statusText = '⚠ $message');
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(message),
+                backgroundColor: Colors.orange[800],
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          case 'error':
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(message),
+                backgroundColor: Colors.red,
+                duration: const Duration(seconds: 4),
+              ),
+            );
+        }
+      },
+      onError: (e) {
+        debugPrint('Event stream error: $e');
+      },
+    );
+  }
+
   @override
   void dispose() {
     _frameSub?.cancel();
+    _eventSub?.cancel();
     CameraControl.stopCamera();
     super.dispose();
   }
@@ -195,6 +243,9 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _toggleAwb() async {
+    // Ignore taps while a previous request is still in flight.
+    if (_awbPending) return;
+    setState(() => _awbPending = true);
     try {
       final enabled = await CameraControl.toggleAwb();
       if (!mounted) return;
@@ -211,6 +262,8 @@ class _CameraScreenState extends State<CameraScreen> {
           backgroundColor: Colors.red,
         ),
       );
+    } finally {
+      if (mounted) setState(() => _awbPending = false);
     }
   }
 
@@ -286,6 +339,7 @@ class _CameraScreenState extends State<CameraScreen> {
                 icon: Icons.wb_auto,
                 label: 'AWB',
                 isActive: _awbEnabled,
+                isPending: _awbPending,
                 onTap: _toggleAwb,
               ),
               // Future buttons go here (AF, AE, zoom, etc.)
@@ -405,6 +459,9 @@ class _ToolbarButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final bool isActive;
+
+  /// When true the button is visually dimmed and taps are ignored.
+  final bool isPending;
   final VoidCallback onTap;
 
   const _ToolbarButton({
@@ -412,39 +469,42 @@ class _ToolbarButton extends StatelessWidget {
     required this.label,
     required this.isActive,
     required this.onTap,
+    this.isPending = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final color = isPending
+        ? Colors.grey
+        : (isActive ? Colors.greenAccent : Colors.redAccent);
     return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 48,
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          color: isActive
-              ? Colors.green.withValues(alpha: 0.2)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon,
-              size: 28,
-              color: isActive ? Colors.greenAccent : Colors.redAccent,
-            ),
-            const SizedBox(height: 2),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 9,
-                fontWeight: FontWeight.bold,
-                color: isActive ? Colors.greenAccent : Colors.redAccent,
+      onTap: isPending ? null : onTap,
+      child: Opacity(
+        opacity: isPending ? 0.4 : 1.0,
+        child: Container(
+          width: 48,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: isActive && !isPending
+                ? Colors.green.withValues(alpha: 0.2)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 28, color: color),
+              const SizedBox(height: 2),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

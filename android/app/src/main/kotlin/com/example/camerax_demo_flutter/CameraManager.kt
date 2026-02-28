@@ -67,6 +67,8 @@ class CameraManager(
 
     // EventChannel sink for streaming analysis frames to Dart
     private var frameSink: EventChannel.EventSink? = null
+    // EventChannel sink for streaming events (status, warnings, errors) to Dart
+    private var eventSink: EventChannel.EventSink? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // ── Analysis frame management ───────────────────────────────────────
@@ -89,6 +91,33 @@ class CameraManager(
     /** Set the EventChannel sink for streaming analysis frames. */
     fun setFrameSink(sink: EventChannel.EventSink?) {
         frameSink = sink
+    }
+
+    /** Set the EventChannel sink for streaming events (status/warnings/errors). */
+    fun setEventSink(sink: EventChannel.EventSink?) {
+        eventSink = sink
+    }
+
+    /**
+     * Push a typed event to Dart on the main thread.
+     * @param type  "status" | "warning" | "error"
+     * @param tag   identifies the source (e.g. "cameraSettings", "frameAnalysis")
+     * @param message human-readable description
+     * @param data  optional extra key-value pairs
+     */
+    private fun pushEvent(
+        type: String,
+        tag: String,
+        message: String,
+        data: Map<String, Any> = emptyMap()
+    ) {
+        val event = mutableMapOf<String, Any>(
+            "type" to type,
+            "tag" to tag,
+            "message" to message
+        )
+        if (data.isNotEmpty()) event["data"] = data
+        mainHandler.post { eventSink?.success(event) }
     }
 
     // ── Camera lifecycle ────────────────────────────────────────────────
@@ -171,26 +200,13 @@ class CameraManager(
                 )
                 this.camera = cam
 
-                // Disable AF, AE, AWB via Camera2 interop
+                // Notify Dart that the camera is ready. Resolution info is available
+                // immediately after bind; settings state will follow via the event stream.
+                callback(gatherResolutionInfo(), null)
+
+                // Disable AF, AE, AWB asynchronously. Result is pushed to Dart via
+                // the events EventChannel, not coupled to the startCamera response.
                 disableAutoControls(cam)
-
-                // Gather resolution info
-                val captureRes = imageCapture!!.resolutionInfo?.resolution
-                val analysisRes = imageAnalysis!!.resolutionInfo?.resolution
-                Log.i(TAG, "Capture resolution : $captureRes")
-                Log.i(TAG, "Analysis resolution: $analysisRes")
-
-                val result = mutableMapOf<String, Any>()
-                captureRes?.let {
-                    result["captureWidth"] = it.width
-                    result["captureHeight"] = it.height
-                }
-                analysisRes?.let {
-                    result["analysisWidth"] = it.width
-                    result["analysisHeight"] = it.height
-                }
-
-                callback(result, null)
             } catch (e: Exception) {
                 Log.e(TAG, "Camera start failed", e)
                 callback(null, e)
@@ -273,10 +289,37 @@ class CameraManager(
             try {
                 result.get()
                 Log.i(TAG, "Camera2 interop: AF, AE, AWB all set to OFF")
+                pushEvent(
+                    type = "status",
+                    tag = "cameraSettings",
+                    message = "AF: OFF | AE: OFF | AWB: OFF",
+                    data = mapOf("afEnabled" to false, "aeEnabled" to false, "awbEnabled" to false)
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to disable auto controls", e)
+                pushEvent(
+                    type = "warning",
+                    tag = "cameraSettings",
+                    message = "Failed to disable auto controls: ${e.message ?: "unknown"}"
+                )
             }
         }, ContextCompat.getMainExecutor(context))
+    }
+
+    // ── Resolution info ─────────────────────────────────────────────────
+    private fun gatherResolutionInfo(): Map<String, Any> {
+        val result = mutableMapOf<String, Any>()
+        imageCapture?.resolutionInfo?.resolution?.let {
+            result["captureWidth"] = it.width
+            result["captureHeight"] = it.height
+        }
+        imageAnalysis?.resolutionInfo?.resolution?.let {
+            result["analysisWidth"] = it.width
+            result["analysisHeight"] = it.height
+        }
+        Log.i(TAG, "Capture resolution : ${imageCapture?.resolutionInfo?.resolution}")
+        Log.i(TAG, "Analysis resolution: ${imageAnalysis?.resolutionInfo?.resolution}")
+        return result
     }
 
     // ── Continuous frame capture loop (ImageAnalysis) ───────────────────
@@ -333,6 +376,11 @@ class CameraManager(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Frame processing error", e)
+            pushEvent(
+                type = "error",
+                tag = "frameAnalysis",
+                message = "Frame processing error: ${e.message ?: "unknown"}"
+            )
         } finally {
             imageProxy.close()
         }
@@ -519,8 +567,11 @@ class CameraManager(
             return
         }
 
-        isAwbEnabled = !isAwbEnabled
-        val awbMode = if (isAwbEnabled) {
+        // Capture the before/after states as locals so that rapid successive
+        // calls cannot corrupt each other's callbacks via isAwbEnabled mutations.
+        val previousEnabled = isAwbEnabled
+        val desiredEnabled = !previousEnabled
+        val awbMode = if (desiredEnabled) {
             CameraMetadata.CONTROL_AWB_MODE_AUTO
         } else {
             CameraMetadata.CONTROL_AWB_MODE_OFF
@@ -535,17 +586,17 @@ class CameraManager(
         result.addListener({
             try {
                 result.get()
-                val label = if (isAwbEnabled) "AUTO" else "OFF"
+                // Commit only after the hardware confirms the change.
+                isAwbEnabled = desiredEnabled
+                val label = if (desiredEnabled) "AUTO" else "OFF"
                 Log.i(TAG, "AWB set to $label")
-                mainHandler.post {
-                    callback(isAwbEnabled, null)
-                }
+                // Listener runs on getMainExecutor — call directly, no post needed.
+                callback(desiredEnabled, null)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to toggle AWB", e)
-                isAwbEnabled = !isAwbEnabled  // revert
-                mainHandler.post {
-                    callback(null, e)
-                }
+                // Revert to the captured previous state, not a blind flip.
+                isAwbEnabled = previousEnabled
+                callback(null, e)
             }
         }, ContextCompat.getMainExecutor(context))
     }
