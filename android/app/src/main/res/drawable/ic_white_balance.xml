@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    White Balance icon: "WB" text inside a circle with a sun-ray indicator.
+    Represents the standard white-balance / color-temperature control.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?android:attr/colorControlNormal">
+
+    <!-- Outer circle -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:pathData="M12,12m-9.5,0a9.5,9.5 0,1 1,19 0a9.5,9.5 0,1 1,-19 0" />
+
+    <!-- Letter W -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M5.5,9 L7,15 L8.5,11.5 L10,15 L11.5,9"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Letter B -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M13.5,9 L13.5,15 M13.5,9 L16,9 Q18,9 18,10.5 Q18,12 16,12 L13.5,12 L16.2,12 Q18.5,12 18.5,13.5 Q18.5,15 16.2,15 L13.5,15" />
+</vector>
