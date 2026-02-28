@@ -1,30 +1,28 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:camera_x_demo/main.dart';
+import 'package:camerax_demo_flutter/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('CameraXDemoApp smoke test — renders without crashing', (
+    WidgetTester tester,
+  ) async {
+    // Stub the MethodChannel so initCamera() doesn't throw
+    // MissingPluginException when requestPermission is called.
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('com.example.camerax/control'),
+      (call) async {
+        if (call.method == 'requestPermission') return false;
+        return null;
+      },
+    );
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpWidget(const CameraXDemoApp());
+    // Give a single frame for the async initCamera() to begin.
     await tester.pump();
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // The app should render the permission-denied message when the stub
+    // returns false.
+    expect(find.text('Camera permission required'), findsOneWidget);
   });
 }
