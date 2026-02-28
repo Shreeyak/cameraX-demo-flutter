@@ -110,6 +110,17 @@ class MainActivity : FlutterActivity() {
                         result.success(manager.getResolutionInfo())
                     }
 
+                    "setColorTemperature" -> {
+                        val kelvin = call.argument<Int>("kelvin") ?: 5500
+                        manager.setColorTemperature(kelvin) { error ->
+                            if (error != null) {
+                                result.error("SET_TEMP_FAILED", error.message, null)
+                            } else {
+                                result.success(null)
+                            }
+                        }
+                    }
+
                     else -> result.notImplemented()
                 }
             }

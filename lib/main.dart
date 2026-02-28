@@ -67,6 +67,10 @@ class CameraControl {
     return enabled ?? false;
   }
 
+  /// Set a manual color temperature in Kelvin (AWB must be OFF).
+  static Future<void> setColorTemperature(int kelvin) =>
+      _method.invokeMethod('setColorTemperature', {'kelvin': kelvin});
+
   /// Get current resolution info.
   static Future<Map<String, dynamic>> getResolution() async {
     final result = await _method.invokeMethod<Map>('getResolution');
@@ -101,6 +105,9 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _saving = false;
   bool _awbEnabled = false;
   bool _awbPending = false; // true while a toggleAwb call is in flight
+  int _colorTempK = 5500; // current manual color temperature (Kelvin)
+  bool _tempPending =
+      false; // true while a setColorTemperature request is in flight
   String _captureResolution = '--';
   String _analysisResolution = '--';
   String _statusText = 'Initializing...';
@@ -267,6 +274,32 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  /// Set manual color temperature. Updates the UI immediately (optimistic) and
+  /// sends requests to the camera, looping until the latest value is applied.
+  Future<void> _setColorTemperature(int kelvin) async {
+    if (_awbEnabled) return; // AWB must be OFF for manual temperature
+    // Immediate UI feedback — do not wait for the camera round-trip.
+    setState(() => _colorTempK = kelvin);
+    // Gate actual camera requests: if one is already in flight, the while-loop
+    // below will catch any value changes that happen while we wait.
+    if (_tempPending) return;
+    setState(() => _tempPending = true);
+    try {
+      while (true) {
+        final targetK = _colorTempK;
+        await CameraControl.setColorTemperature(targetK);
+        if (!mounted) return;
+        // If the user kept dragging while we waited, apply the new value.
+        if (_colorTempK == targetK) break;
+      }
+    } catch (e) {
+      if (!mounted) return;
+      debugPrint('Set color temperature failed: $e');
+    } finally {
+      if (mounted) setState(() => _tempPending = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -357,94 +390,130 @@ class _CameraScreenState extends State<CameraScreen> {
       decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.8)),
       child: SafeArea(
         top: false,
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // ── Thumbnail from ImageAnalysis ──
-            Container(
-              width: 160,
-              height: 120,
-              decoration: BoxDecoration(
-                color: Colors.grey[900],
-                border: Border.all(color: Colors.grey[700]!, width: 1),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: _thumbnailBytes != null
-                  ? ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: Image.memory(
-                        _thumbnailBytes!,
-                        width: 160,
-                        height: 120,
-                        fit: BoxFit.contain,
-                        gaplessPlayback: true, // avoid flicker on updates
-                      ),
-                    )
-                  : const Center(
-                      child: Text(
-                        'No frames',
-                        style: TextStyle(color: Colors.grey, fontSize: 12),
-                      ),
-                    ),
-            ),
-            const SizedBox(width: 16),
-
-            // ── Info + save ──
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.center,
+            // ── Color temperature slider (visible when camera is running) ──
+            if (_cameraStarted) ...[
+              Row(
                 children: [
-                  // Resolution info
+                  const Icon(Icons.thermostat, size: 14, color: Colors.white54),
+                  const SizedBox(width: 4),
                   Text(
-                    'Capture: $_captureResolution',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontFamily: 'monospace',
-                    ),
-                  ),
-                  Text(
-                    'Analysis: $_analysisResolution',
-                    style: const TextStyle(
-                      color: Colors.white70,
-                      fontSize: 12,
-                      fontFamily: 'monospace',
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-
-                  // Status text
-                  Text(
-                    _statusText,
-                    style: const TextStyle(color: Colors.amber, fontSize: 12),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 8),
-
-                  // Save button
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: _cameraStarted && !_saving ? _saveFrame : null,
-                      icon: _saving
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Icon(Icons.save, size: 18),
-                      label: Text(_saving ? 'Capturing…' : 'Save Frame'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blueAccent,
-                        foregroundColor: Colors.white,
-                      ),
+                    'Color Temp${_awbEnabled ? ' (AWB ON)' : ''}',
+                    style: TextStyle(
+                      color: _awbEnabled ? Colors.white38 : Colors.white70,
+                      fontSize: 11,
                     ),
                   ),
                 ],
               ),
+              const SizedBox(height: 4),
+              _TemperatureSlider(
+                value: _colorTempK,
+                enabled: !_awbEnabled,
+                onChanged: _setColorTemperature,
+              ),
+              const SizedBox(height: 10),
+            ],
+
+            // ── Thumbnail + info + save ──
+            Row(
+              children: [
+                // ── Thumbnail from ImageAnalysis ──
+                Container(
+                  width: 160,
+                  height: 120,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[900],
+                    border: Border.all(color: Colors.grey[700]!, width: 1),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: _thumbnailBytes != null
+                      ? ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: Image.memory(
+                            _thumbnailBytes!,
+                            width: 160,
+                            height: 120,
+                            fit: BoxFit.contain,
+                            gaplessPlayback: true, // avoid flicker on updates
+                          ),
+                        )
+                      : const Center(
+                          child: Text(
+                            'No frames',
+                            style: TextStyle(color: Colors.grey, fontSize: 12),
+                          ),
+                        ),
+                ),
+                const SizedBox(width: 16),
+
+                // ── Info + save ──
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      // Resolution info
+                      Text(
+                        'Capture: $_captureResolution',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                      Text(
+                        'Analysis: $_analysisResolution',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+
+                      // Status text
+                      Text(
+                        _statusText,
+                        style: const TextStyle(
+                          color: Colors.amber,
+                          fontSize: 12,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 8),
+
+                      // Save button
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _cameraStarted && !_saving
+                              ? _saveFrame
+                              : null,
+                          icon: _saving
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.save, size: 18),
+                          label: Text(_saving ? 'Capturing…' : 'Save Frame'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blueAccent,
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -509,4 +578,213 @@ class _ToolbarButton extends StatelessWidget {
       ),
     );
   }
+}
+// ── Temperature slider ─────────────────────────────────────────────────
+
+/// A horizontal touch-controlled color-temperature slider.
+///
+/// Displays a warm→cool gradient strip with tick marks at every [step] Kelvin
+/// and labels at every 1000 K. The user can tap or drag anywhere on the strip
+/// to set the value; the current position is shown by a white marker line.
+class _TemperatureSlider extends StatefulWidget {
+  const _TemperatureSlider({
+    required this.value,
+    required this.onChanged,
+    this.enabled = true,
+  });
+
+  final int value;
+  final ValueChanged<int> onChanged;
+  final bool enabled;
+
+  static const int kMin = 2000;
+  static const int kMax = 10000;
+  static const int kStep = 250;
+
+  @override
+  State<_TemperatureSlider> createState() => _TemperatureSliderState();
+}
+
+class _TemperatureSliderState extends State<_TemperatureSlider> {
+  double? _dragStartX;
+  int? _dragStartValue;
+
+  int _snap(double rawK) {
+    const min = _TemperatureSlider.kMin;
+    const max = _TemperatureSlider.kMax;
+    const step = _TemperatureSlider.kStep;
+    final snapped = ((rawK - min) / step).round() * step + min;
+    return snapped.clamp(min, max);
+  }
+
+  void _onPanStart(DragStartDetails d) {
+    _dragStartX = d.localPosition.dx;
+    _dragStartValue = widget.value;
+  }
+
+  void _onPanUpdate(DragUpdateDetails d, double width) {
+    if (_dragStartX == null || _dragStartValue == null) return;
+    final dx = d.localPosition.dx - _dragStartX!;
+    final deltaK =
+        (dx / width) * (_TemperatureSlider.kMax - _TemperatureSlider.kMin);
+    widget.onChanged(_snap(_dragStartValue! + deltaK));
+  }
+
+  void _onTapDown(TapDownDetails d, double width) {
+    final frac = (d.localPosition.dx / width).clamp(0.0, 1.0);
+    widget.onChanged(
+      _snap(
+        _TemperatureSlider.kMin +
+            frac * (_TemperatureSlider.kMax - _TemperatureSlider.kMin),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final w = constraints.maxWidth;
+        return Opacity(
+          opacity: widget.enabled ? 1.0 : 0.35,
+          child: GestureDetector(
+            onPanStart: widget.enabled ? _onPanStart : null,
+            onPanUpdate: widget.enabled ? (d) => _onPanUpdate(d, w) : null,
+            onTapDown: widget.enabled ? (d) => _onTapDown(d, w) : null,
+            child: CustomPaint(
+              size: Size(w, 72),
+              painter: _TemperatureScalePainter(value: widget.value),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ── Temperature scale painter ──────────────────────────────────────────
+
+class _TemperatureScalePainter extends CustomPainter {
+  const _TemperatureScalePainter({required this.value});
+
+  final int value;
+
+  static const _min = _TemperatureSlider.kMin;
+  static const _max = _TemperatureSlider.kMax;
+  static const _step = _TemperatureSlider.kStep;
+
+  // Warm-to-cool gradient stops matching the 2000–10000 K range.
+  static const _gradientColors = [
+    Color(0xFFFF4500), // 2000 K – deep orange
+    Color(0xFFFFAA00), // 3000 K – amber
+    Color(0xFFFFE4B0), // 4000 K – warm yellow-white
+    Color(0xFFFFFFFF), // 5500 K – neutral white
+    Color(0xFFD0E8FF), // 6500 K – slightly blue
+    Color(0xFF90B8FF), // 8000 K – cool blue
+    Color(0xFF5888F5), // 10000 K – deep blue
+  ];
+  // stops = (K - 2000) / (10000 - 2000)
+  static const _gradientStops = [0.0, 0.125, 0.25, 0.4375, 0.5625, 0.75, 1.0];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double range = (_max - _min).toDouble();
+    final rrect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      const Radius.circular(10),
+    );
+
+    // ── Gradient background ──
+    final gradient = const LinearGradient(
+      colors: _gradientColors,
+      stops: _gradientStops,
+    );
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..shader = gradient.createShader(
+          Rect.fromLTWH(0, 0, size.width, size.height),
+        ),
+    );
+    // Darken overlay for tick/label contrast
+    canvas.drawRRect(rrect, Paint()..color = const Color(0x40000000));
+
+    // ── Tick marks ──
+    final tickPaint = Paint()
+      ..color = const Color(0xBFFFFFFF)
+      ..strokeWidth = 1.0;
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+
+    for (int k = _min; k <= _max; k += _step) {
+      final x = (k - _min) / range * size.width;
+      final isMajor = k % 1000 == 0;
+      final tickTop = size.height - (isMajor ? 22.0 : 11.0);
+      canvas.drawLine(Offset(x, tickTop), Offset(x, size.height), tickPaint);
+
+      if (isMajor) {
+        tp.text = TextSpan(
+          text: '${k ~/ 1000}K',
+          style: const TextStyle(
+            color: Color(0xFFFFFFFF),
+            fontSize: 9,
+            fontWeight: FontWeight.w600,
+            shadows: [Shadow(blurRadius: 2, color: Color(0x88000000))],
+          ),
+        );
+        tp.layout();
+        final lx = (x - tp.width / 2).clamp(0.0, size.width - tp.width);
+        tp.paint(canvas, Offset(lx, tickTop - tp.height - 1));
+      }
+    }
+
+    // ── Current value indicator line ──
+    final cx = (value - _min) / range * size.width;
+    canvas.drawLine(
+      Offset(cx, 0),
+      Offset(cx, size.height),
+      Paint()
+        ..color = const Color(0xFFFFFFFF)
+        ..strokeWidth = 2.5,
+    );
+
+    // Triangle pointer at top of indicator
+    final tri = Path()
+      ..moveTo(cx - 6, 0)
+      ..lineTo(cx + 6, 0)
+      ..lineTo(cx, 9)
+      ..close();
+    canvas.drawPath(tri, Paint()..color = const Color(0xFFFFFFFF));
+    canvas.drawPath(
+      tri,
+      Paint()
+        ..color = const Color(0x66000000)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.5,
+    );
+
+    // ── Value label pill ──
+    tp.text = TextSpan(
+      text: '${value}K',
+      style: const TextStyle(
+        color: Color(0xFFFFFFFF),
+        fontSize: 11,
+        fontWeight: FontWeight.bold,
+        shadows: [Shadow(blurRadius: 3, color: Color(0xFF000000))],
+      ),
+    );
+    tp.layout();
+    final pillW = tp.width + 10;
+    final pillX = (cx - pillW / 2).clamp(0.0, size.width - pillW);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(pillX, 10, pillW, 18),
+        const Radius.circular(4),
+      ),
+      Paint()..color = const Color(0x88000000),
+    );
+    tp.paint(canvas, Offset(pillX + 5, 13));
+  }
+
+  @override
+  bool shouldRepaint(_TemperatureScalePainter old) => old.value != value;
 }
