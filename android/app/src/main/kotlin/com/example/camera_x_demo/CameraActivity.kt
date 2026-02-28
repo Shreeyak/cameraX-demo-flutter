@@ -3,6 +3,7 @@ package com.example.camera_x_demo
 import android.Manifest
 import android.content.ContentValues
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
@@ -54,9 +55,11 @@ class CameraActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityCameraBinding
     private var imageCapture: ImageCapture? = null
+    private var camera: Camera? = null
     @Volatile private var latestBitmap: Bitmap? = null
     private var reusableBitmap: Bitmap? = null  // pre-allocated bitmap for analysis frames
     private lateinit var cameraExecutor: ExecutorService
+    private var isAwbEnabled = false  // AWB starts OFF (disabled by disableAutoControls)
 
     // ── Permission handling ─────────────────────────────────────────────
     private val requestPermissionLauncher = registerForActivityResult(
@@ -78,6 +81,8 @@ class CameraActivity : AppCompatActivity() {
 
         cameraExecutor = Executors.newSingleThreadExecutor()
         binding.saveButton.setOnClickListener { saveFrameToDisk() }
+        binding.awbToggle.setOnClickListener { toggleAwb() }
+        updateAwbButtonVisual()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
@@ -168,6 +173,7 @@ class CameraActivity : AppCompatActivity() {
                 val camera = cameraProvider.bindToLifecycle(
                     this, cameraSelector, preview, imageCapture!!, imageAnalysis
                 )
+                this.camera = camera
 
                 // Disable AF, AE, AWB via Camera2 interop
                 disableAutoControls(camera)
@@ -454,6 +460,62 @@ class CameraActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.w(TAG, "Could not write EXIF orientation", e)
         }
+    }
+
+    // ── AWB toggle ──────────────────────────────────────────────────────
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun toggleAwb() {
+        val cam = camera ?: return
+        isAwbEnabled = !isAwbEnabled
+
+        val awbMode = if (isAwbEnabled) {
+            CameraMetadata.CONTROL_AWB_MODE_AUTO
+        } else {
+            CameraMetadata.CONTROL_AWB_MODE_OFF
+        }
+
+        val camera2Control = Camera2CameraControl.from(cam.cameraControl)
+        val result = camera2Control.setCaptureRequestOptions(
+            CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, awbMode)
+                .build()
+        )
+        result.addListener({
+            try {
+                result.get()
+                val label = if (isAwbEnabled) "AUTO" else "OFF"
+                Log.i(TAG, "AWB set to $label")
+                runOnUiThread {
+                    updateAwbButtonVisual()
+                    updateStatusText()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to toggle AWB", e)
+                isAwbEnabled = !isAwbEnabled  // revert
+                runOnUiThread {
+                    Toast.makeText(this, "AWB toggle failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    /** Update the AWB button icon tint and background to reflect current state. */
+    private fun updateAwbButtonVisual() {
+        if (isAwbEnabled) {
+            // ON: green tint, slight highlight background
+            binding.awbToggle.imageTintList = ColorStateList.valueOf(0xFF4CAF50.toInt())
+            binding.awbToggle.setBackgroundColor(0x3300FF00)
+        } else {
+            // OFF: red tint, transparent background
+            binding.awbToggle.imageTintList = ColorStateList.valueOf(0xFFFF4444.toInt())
+            binding.awbToggle.setBackgroundColor(0x00000000)
+        }
+    }
+
+    /** Refresh the status text to reflect current AF/AE/AWB states. */
+    private fun updateStatusText() {
+        val awbLabel = if (isAwbEnabled) "AUTO" else "OFF"
+        binding.statusText.text = "AF: OFF | AE: OFF | AWB: $awbLabel"
     }
 
     companion object {

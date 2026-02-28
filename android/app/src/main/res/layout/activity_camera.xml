@@ -10,7 +10,34 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Bottom controls overlay -->
+    <!-- ── Right-edge toolbar: toggle buttons (scalable for 2-4 more) ── -->
+    <LinearLayout
+        android:id="@+id/toolbar_strip"
+        android:layout_width="56dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="end|center_vertical"
+        android:orientation="vertical"
+        android:padding="4dp"
+        android:background="#99000000">
+
+        <!-- AWB toggle -->
+        <ImageButton
+            android:id="@+id/awb_toggle"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_margin="4dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_white_balance"
+            android:scaleType="centerInside"
+            android:padding="8dp"
+            android:contentDescription="Toggle auto white balance"
+            android:tint="#FF4444" />
+
+        <!-- Future buttons go here (AF, AE, zoom, etc.) -->
+
+    </LinearLayout>
+
+    <!-- ── Bottom controls overlay ── -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
