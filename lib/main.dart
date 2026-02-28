@@ -1,13 +1,14 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Lock to portrait for consistent camera orientation
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   runApp(const CameraXDemoApp());
 }
 
@@ -97,6 +98,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   // Analysis frame thumbnail
   Uint8List? _thumbnailBytes;
+  StreamSubscription<Map<dynamic, dynamic>>? _frameSub;
 
   @override
   void initState() {
@@ -146,7 +148,7 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   void _listenToFrames() {
-    CameraControl.frameStream.listen(
+    _frameSub = CameraControl.frameStream.listen(
       (frame) {
         if (!mounted) return;
         final bytes = frame['bytes'];
@@ -161,6 +163,13 @@ class _CameraScreenState extends State<CameraScreen> {
         debugPrint('Frame stream error: $e');
       },
     );
+  }
+
+  @override
+  void dispose() {
+    _frameSub?.cancel();
+    CameraControl.stopCamera();
+    super.dispose();
   }
 
   Future<void> _saveFrame() async {

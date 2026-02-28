@@ -71,6 +71,8 @@ class CameraManager(
 
     // ── Analysis frame management ───────────────────────────────────────
     @Volatile private var reusableBitmap: Bitmap? = null
+    // Reusable padded-width bitmap for devices where rowStride > pixelStride * width
+    @Volatile private var reusablePaddedBitmap: Bitmap? = null
 
     /** Set the PreviewView whose surface provider will receive the camera feed. */
     fun setPreviewView(view: PreviewView) {
@@ -205,6 +207,8 @@ class CameraManager(
 
         reusableBitmap?.recycle()
         reusableBitmap = null
+        reusablePaddedBitmap?.recycle()
+        reusablePaddedBitmap = null
 
         cameraExecutor?.let { executor ->
             executor.shutdown()
@@ -282,6 +286,12 @@ class CameraManager(
      */
     private fun processFrame(imageProxy: ImageProxy) {
         try {
+            // Fast-path: skip conversion if no sink is listening
+            if (frameSink == null) {
+                imageProxy.close()
+                return
+            }
+
             val w = imageProxy.width
             val h = imageProxy.height
             val rotationDegrees = imageProxy.imageInfo.rotationDegrees
@@ -346,14 +356,34 @@ class CameraManager(
             return bitmap
         }
 
-        // Row-stride padding present — need padded-width bitmap, then crop
-        val bitmapWidth = w + rowPadding / pixelStride
-        val padded = Bitmap.createBitmap(bitmapWidth, h, Bitmap.Config.ARGB_8888)
+        // Row-stride padding present — copy into reusable padded bitmap,
+        // then blit the valid region into the reusable output bitmap.
+        val paddedWidth = w + rowPadding / pixelStride
+        val padded = getOrCreatePaddedBitmap(paddedWidth, h)
         buffer.rewind()
         padded.copyPixelsFromBuffer(buffer)
-        val cropped = Bitmap.createBitmap(padded, 0, 0, w, h)
-        if (cropped !== padded) padded.recycle()
-        return cropped
+
+        val dst = getOrCreateBitmap(w, h)
+        val canvas = android.graphics.Canvas(dst)
+        canvas.drawBitmap(
+            padded,
+            android.graphics.Rect(0, 0, w, h),
+            android.graphics.RectF(0f, 0f, w.toFloat(), h.toFloat()),
+            null
+        )
+        return dst
+    }
+
+    /** Returns a reusable padded-width bitmap, reallocating only when dimensions change. */
+    private fun getOrCreatePaddedBitmap(w: Int, h: Int): Bitmap {
+        val existing = reusablePaddedBitmap
+        if (existing != null && !existing.isRecycled && existing.width == w && existing.height == h) {
+            return existing
+        }
+        existing?.recycle()
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        reusablePaddedBitmap = bitmap
+        return bitmap
     }
 
     /** Returns a reusable bitmap if dimensions match, or allocates a new one. */
