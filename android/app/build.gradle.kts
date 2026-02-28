@@ -19,10 +19,6 @@ android {
         jvmTarget = JavaVersion.VERSION_11.toString()
     }
 
-    buildFeatures {
-        viewBinding = true
-    }
-
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.camerax_demo_flutter"
@@ -54,7 +50,6 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
     implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("com.google.guava:guava:33.3.1-android")

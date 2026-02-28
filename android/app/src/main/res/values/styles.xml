@@ -16,9 +16,4 @@
         <item name="android:windowBackground">?android:colorBackground</item>
     </style>
 
-    <!-- Fullscreen theme for the native CameraX activity -->
-    <style name="CameraTheme" parent="Theme.AppCompat.NoActionBar">
-        <item name="android:windowBackground">@android:color/black</item>
-        <item name="android:windowFullscreen">true</item>
-    </style>
 </resources>
