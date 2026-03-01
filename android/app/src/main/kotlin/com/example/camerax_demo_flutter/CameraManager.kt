@@ -137,6 +137,13 @@ class CameraManager(
         }
     }
 
+    /** Called when the Flutter PlatformView is disposed (e.g. during a hot restart). */
+    fun onPreviewDisposed() {
+        Log.i(TAG, "PreviewView disposed")
+        previewView = null
+        stopCamera()
+    }
+
     /** Set the EventChannel sink for streaming analysis frames. */
     fun setFrameSink(sink: EventChannel.EventSink?) {
         frameSink = sink
@@ -248,27 +255,6 @@ class CameraManager(
                             // it.  Once we switch to TRANSFORM_MATRIX mode the result
                             // echoes back our own set value, so we stop updating.
                             val awbMode = result.get(CaptureResult.CONTROL_AWB_MODE)
-                            if (awbMode != null && awbMode != CameraMetadata.CONTROL_AWB_MODE_OFF) {
-                                result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)?.let {
-                                    capturedColorTransform = it
-                                }
-                                // Capture and log AWB gains for diagnostic visibility.
-                                result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { gains ->
-                                    val prev = capturedColorGains
-                                    capturedColorGains = gains
-                                    // Log the first time, and whenever they change noticeably.
-                                    if (prev == null ||
-                                        Math.abs(gains.red - prev.red) > 0.05f ||
-                                        Math.abs(gains.blue - prev.blue) > 0.05f
-                                    ) {
-                                        Log.i(TAG, "AWB gains (mode=$awbMode): " +
-                                            "R=${"%.3f".format(gains.red)} " +
-                                            "Ge=${"%.3f".format(gains.greenEven)} " +
-                                            "Go=${"%.3f".format(gains.greenOdd)} " +
-                                            "B=${"%.3f".format(gains.blue)}")
-                                    }
-                                }
-                            }
 
                             // Capture last focus distance for restoring when MF is enabled
                             result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { focus ->
@@ -332,6 +318,7 @@ class CameraManager(
         cameraProvider?.unbindAll()
         camera = null
         imageCapture = null
+        imageAnalysis?.clearAnalyzer()
         imageAnalysis = null
 
         reusableBitmap?.recycle()

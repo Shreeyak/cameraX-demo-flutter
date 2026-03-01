@@ -42,10 +42,15 @@ class MainActivity : FlutterActivity() {
         // ── Register PlatformView factory ──
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "camerax-preview",
-            CameraPreviewFactory { previewView ->
-                // Called when the PlatformView creates the PreviewView
-                manager.setPreviewView(previewView)
-            }
+            CameraPreviewFactory(
+                onViewCreated = { previewView ->
+                    // Called when the PlatformView creates the PreviewView
+                    manager.setPreviewView(previewView)
+                },
+                onViewDisposed = {
+                    manager.onPreviewDisposed()
+                }
+            )
         )
 
         // ── MethodChannel for camera commands ──
