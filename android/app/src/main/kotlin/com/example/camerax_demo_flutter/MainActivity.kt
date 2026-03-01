@@ -112,6 +112,17 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    "setAfEnabled" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        manager.setAfEnabled(enabled) { error ->
+                            if (error != null) {
+                                result.error("AF_SET_FAILED", error.message, null)
+                            } else {
+                                result.success(null)
+                            }
+                        }
+                    }
+
                     "getAvailableWhiteBalanceModes" -> {
                         result.success(manager.getAvailableWhiteBalanceModes())
                     }

@@ -81,8 +81,8 @@ class CameraControl {
   }
 
   /// @deprecated Use setWhiteBalancePreset instead.
-  static Future<void> setColorTemperature(int kelvin) =>
-      _method.invokeMethod('setColorTemperature', {'kelvin': kelvin});
+  static Future<void> setAfEnabled(bool enabled) =>
+      _method.invokeMethod('setAfEnabled', {'enabled': enabled});
 
   /// Get current resolution info.
   static Future<Map<String, dynamic>> getResolution() async {
@@ -121,6 +121,9 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _wbPending = false;
   List<int> _availableWbModes = []; // populated after camera starts
   bool _isAwbDrawerOpen = false;
+
+  bool _afEnabled = false;
+
   String _captureResolution = '--';
   String _analysisResolution = '--';
   String _statusText = 'Initializing...';
@@ -291,6 +294,26 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  Future<void> _toggleAf() async {
+    final previousAf = _afEnabled;
+    setState(() {
+      _afEnabled = !_afEnabled;
+    });
+    try {
+      // Optimistically update
+      await CameraControl.setAfEnabled(_afEnabled);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _afEnabled = previousAf);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('AF toggle failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -386,6 +409,41 @@ class _CameraScreenState extends State<CameraScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                // AF Toggle Button (above WB)
+                GestureDetector(
+                  onTap: _toggleAf,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    color: Colors.transparent,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _afEnabled
+                              ? Icons.center_focus_strong
+                              : Icons.center_focus_weak,
+                          size: 24,
+                          color: _afEnabled
+                              ? Colors.greenAccent
+                              : Colors.white54,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          _afEnabled ? 'AF ON' : 'AF OFF',
+                          style: TextStyle(
+                            color: _afEnabled
+                                ? Colors.greenAccent
+                                : Colors.white54,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // WB Drawer Toggle
                 GestureDetector(
                   onTap: () {
                     setState(() {
