@@ -23,12 +23,14 @@ class MainActivity : FlutterActivity() {
         private const val TAG = "CameraXDemo"
         private const val METHOD_CHANNEL = "com.example.camerax/control"
         private const val EVENT_CHANNEL = "com.example.camerax/frames"
+        private const val EVENTS_CHANNEL = "com.example.camerax/kotlinEvents"
         private const val CAMERA_PERMISSION_CODE = 1001
     }
 
     private var cameraManager: CameraManager? = null
     private var methodChannel: MethodChannel? = null
     private var eventChannel: EventChannel? = null
+    private var eventsChannel: EventChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -95,17 +97,32 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "toggleAwb" -> {
-                        manager.toggleAwb { enabled, error ->
+                        // Legacy — kept for backward compat; no-ops now.
+                        result.success(false)
+                    }
+
+                    "setWhiteBalancePreset" -> {
+                        val mode = call.argument<Int>("mode") ?: 1
+                        manager.setWhiteBalancePreset(mode) { error ->
                             if (error != null) {
-                                result.error("AWB_FAILED", error.message, null)
+                                result.error("WB_PRESET_FAILED", error.message, null)
                             } else {
-                                result.success(enabled)
+                                result.success(null)
                             }
                         }
                     }
 
+                    "getAvailableWhiteBalanceModes" -> {
+                        result.success(manager.getAvailableWhiteBalanceModes())
+                    }
+
                     "getResolution" -> {
                         result.success(manager.getResolutionInfo())
+                    }
+
+                    "setColorTemperature" -> {
+                        // Legacy — no longer supported; use setWhiteBalancePreset.
+                        result.error("DEPRECATED", "Use setWhiteBalancePreset", null)
                     }
 
                     else -> result.notImplemented()
@@ -127,6 +144,24 @@ class MainActivity : FlutterActivity() {
                 override fun onCancel(arguments: Any?) {
                     Log.i(TAG, "Frame stream: Dart listener detached")
                     manager.setFrameSink(null)
+                }
+            })
+        }
+
+        // ── EventChannel for generic Kotlin events (status/warnings/errors) ──
+        eventsChannel = EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            EVENTS_CHANNEL
+        ).also { channel ->
+            channel.setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    Log.i(TAG, "Events stream: Dart listener attached")
+                    manager.setEventSink(events)
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    Log.i(TAG, "Events stream: Dart listener detached")
+                    manager.setEventSink(null)
                 }
             })
         }
@@ -154,6 +189,7 @@ class MainActivity : FlutterActivity() {
         cameraManager = null
         methodChannel?.setMethodCallHandler(null)
         eventChannel?.setStreamHandler(null)
+        eventsChannel?.setStreamHandler(null)
         super.onDestroy()
     }
 }
