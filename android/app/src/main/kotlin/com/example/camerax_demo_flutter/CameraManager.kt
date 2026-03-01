@@ -839,6 +839,31 @@ class CameraManager(
             ?.toList() ?: listOf(CameraMetadata.CONTROL_AWB_MODE_AUTO)
     }
 
+    @OptIn(ExperimentalCamera2Interop::class)
+    fun getMinFocusDistance(): Float {
+        val cam = camera ?: return 0.0f
+        return Camera2CameraInfo.from(cam.cameraInfo)
+            .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0.0f
+    }
+
+    fun getCurrentFocusDistance(): Float {
+        return capturedFocusDistance ?: 0.0f
+    }
+
+    fun setFocusDistance(distance: Float, callback: (Exception?) -> Unit) {
+        val cam = camera
+        if (cam == null) {
+            callback(IllegalStateException("Camera not ready"))
+            return
+        }
+        capturedFocusDistance = distance
+        if (!afEnabled) {
+            applyAllCaptureOptions(cam, callback)
+        } else {
+            callback(null)
+        }
+    }
+
     /** Get current resolution info as a map. */
     fun getResolutionInfo(): Map<String, Any> {
         val result = mutableMapOf<String, Any>()

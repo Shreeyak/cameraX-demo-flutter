@@ -127,6 +127,29 @@ class MainActivity : FlutterActivity() {
                         result.success(manager.getAvailableWhiteBalanceModes())
                     }
 
+                    "getMinFocusDistance" -> {
+                        result.success(manager.getMinFocusDistance().toDouble())
+                    }
+
+                    "getCurrentFocusDistance" -> {
+                        result.success(manager.getCurrentFocusDistance().toDouble())
+                    }
+
+                    "setFocusDistance" -> {
+                        val distance = call.argument<Double>("distance")
+                        if (distance != null) {
+                            manager.setFocusDistance(distance.toFloat()) { error ->
+                                if (error != null) {
+                                    result.error("FOCUS_SET_FAILED", error.message, null)
+                                } else {
+                                    result.success(null)
+                                }
+                            }
+                        } else {
+                            result.error("INVALID_ARGUMENT", "Focus distance missing", null)
+                        }
+                    }
+
                     "getResolution" -> {
                         result.success(manager.getResolutionInfo())
                     }
