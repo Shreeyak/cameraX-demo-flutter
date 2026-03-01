@@ -334,6 +334,20 @@ class _CameraScreenState extends State<CameraScreen> {
           // ── Right-edge toolbar ──
           Positioned(right: 0, top: 0, bottom: 0, child: _buildToolbar()),
 
+          // ── Background tap to close drawer ──
+          if (_isAwbDrawerOpen)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  setState(() {
+                    _isAwbDrawerOpen = false;
+                  });
+                },
+                child: const SizedBox.expand(),
+              ),
+            ),
+
           // ── Left-edge AWB drawer ──
           Positioned(left: 0, top: 0, bottom: 0, child: _buildLeftBar()),
 
@@ -359,133 +373,97 @@ class _CameraScreenState extends State<CameraScreen> {
         ? _kWbPresets
         : _kWbPresets.where((p) => _availableWbModes.contains(p.mode)).toList();
 
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        width: _isAwbDrawerOpen ? null : 65,
-        margin: EdgeInsets.zero,
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(
-            alpha: 0.8, // Decreased transparency
-          ),
-          border: const Border(
-            right: BorderSide(color: Colors.white24, width: 0.5),
-          ),
-        ),
-        child: SafeArea(
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment:
-                CrossAxisAlignment.end, // Align groups to bottom
-            children: [
-              // AWB Button (Main toggler)
-              SizedBox(
-                width: 64, // Fixed width, accounts for 0.5px border
-                child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  GestureDetector(
-                    onTap: () {
-                      setState(() {
-                        _isAwbDrawerOpen = !_isAwbDrawerOpen;
-                      });
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 24),
-                      color: Colors.transparent, // Ensure gesture hits
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            selectedPreset.icon,
-                            size: 24,
-                            color: Colors.blueAccent,
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            selectedPreset.label,
-                            style: const TextStyle(
-                              color: Colors.blueAccent,
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                            ),
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          const SizedBox(height: 4),
-                          Container(
-                            width: 16,
-                            height: 4,
-                            decoration: BoxDecoration(
-                              color: selectedPreset.indicatorColor,
-                              borderRadius: BorderRadius.circular(2),
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          const Text(
-                            'WB', // Text below the icon
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              ),
-
-              // The Expanded Drawer
-              if (_isAwbDrawerOpen) ...[
-                Container(
-                  width: 1,
-                  height: 140, // Height to accommodate 2 rows
-                  color: Colors.white24,
-                  margin: const EdgeInsets.only(bottom: 12),
-                ),
-                // Preset list
-                Expanded(
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // The Bar (Full-height on left)
+        Container(
+          width: 65,
+          height: double.infinity,
+          color: Colors.black.withValues(alpha: 0.6),
+          child: SafeArea(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _isAwbDrawerOpen = !_isAwbDrawerOpen;
+                    });
+                  },
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 8,
-                    ),
-                    margin: const EdgeInsets.only(bottom: 12),
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Center(
-                        child: Wrap(
-                          direction: Axis.vertical,
-                          spacing: 8, // space between rows vertically
-                          runSpacing: 8, // space between columns horizontally
-                          children: visiblePresets.map((preset) {
-                            final isSelected = preset.mode == _selectedWbMode;
-                            return _WbChip(
-                              preset: preset,
-                              isSelected: isSelected,
-                              isPending: _wbPending && isSelected,
-                              onTap: () {
-                                _setWbPreset(preset.mode);
-                                setState(() {
-                                  _isAwbDrawerOpen = false;
-                                });
-                              },
-                            );
-                          }).toList(),
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    color: Colors.transparent, // Ensure gesture hits
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          selectedPreset.icon,
+                          size: 24,
+                          color: Colors.blueAccent,
                         ),
-                      ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'WB', // Text below the icon
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
               ],
-            ],
+            ),
           ),
         ),
-      ),
+
+        // The Drawer
+        if (_isAwbDrawerOpen)
+          Align(
+            alignment: Alignment.center,
+            child: Container(
+              width:
+                  290, // constrain width to safely allow ~4 items per row (60px each + spacing)
+              margin: const EdgeInsets.only(
+                left: 8,
+              ), // Some breathing room from the bar
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(
+                  alpha: 0.9,
+                ), // Darker shade than the bar
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Wrap(
+                direction: Axis.horizontal,
+                spacing: 8, // space between elements horizontally
+                runSpacing: 8, // space between rows vertically
+                children: visiblePresets.map((preset) {
+                  final isSelected = preset.mode == _selectedWbMode;
+                  return SizedBox(
+                    width: 60,
+                    height: 54, // fixed height for rows
+                    child: _WbChip(
+                      preset: preset,
+                      isSelected: isSelected,
+                      isPending: _wbPending && isSelected,
+                      onTap: () {
+                        _setWbPreset(preset.mode);
+                        setState(() {
+                          _isAwbDrawerOpen = false;
+                        });
+                      },
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
+      ],
     );
   }
 
