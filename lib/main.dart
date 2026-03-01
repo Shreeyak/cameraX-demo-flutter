@@ -80,9 +80,26 @@ class CameraControl {
     return result?.cast<int>() ?? [1];
   }
 
+  /// Get the minimum focus distance (closest focus, highest diopter value).
+  /// 0.0 means fixed focus.
+  static Future<double> getMinFocusDistance() async {
+    final result = await _method.invokeMethod<double>('getMinFocusDistance');
+    return result ?? 0.0;
+  }
+
+  /// Get the current live focus distance in diopters.
+  static Future<double> getCurrentFocusDistance() async {
+    final result = await _method.invokeMethod<double>('getCurrentFocusDistance');
+    return result ?? 0.0;
+  }
+
+  /// Set manual focus distance in diopters (0.0 = infinity, up to minFocusDistance).
+  static Future<void> setFocusDistance(double distance) =>
+      _method.invokeMethod('setFocusDistance', {'distance': distance});
+
   /// @deprecated Use setWhiteBalancePreset instead.
-  static Future<void> setColorTemperature(int kelvin) =>
-      _method.invokeMethod('setColorTemperature', {'kelvin': kelvin});
+  static Future<void> setAfEnabled(bool enabled) =>
+      _method.invokeMethod('setAfEnabled', {'enabled': enabled});
 
   /// Get current resolution info.
   static Future<Map<String, dynamic>> getResolution() async {
@@ -121,6 +138,13 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _wbPending = false;
   List<int> _availableWbModes = []; // populated after camera starts
   bool _isAwbDrawerOpen = false;
+
+  bool _afEnabled = false;
+  double _minFocusDistance = 0.0;
+  double _currentFocusDistance = 0.0;
+  bool _showFocusSlider = false;
+  Timer? _focusSliderTimer;
+
   String _captureResolution = '--';
   String _analysisResolution = '--';
   String _statusText = 'Initializing...';
@@ -171,8 +195,14 @@ class _CameraScreenState extends State<CameraScreen> {
 
       // Fetch supported WB modes and update the preset bar
       final modes = await CameraControl.getAvailableWhiteBalanceModes();
-      if (mounted && modes.isNotEmpty) {
-        setState(() => _availableWbModes = modes);
+      final minFocus = await CameraControl.getMinFocusDistance();
+      if (mounted) {
+        setState(() {
+          if (modes.isNotEmpty) _availableWbModes = modes;
+          _minFocusDistance = minFocus;
+          // Start focus in the middle if greater than 0
+          _currentFocusDistance = minFocus / 2;
+        });
       }
 
       // Start listening to analysis frames and Kotlin events
@@ -239,6 +269,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void dispose() {
+    _focusSliderTimer?.cancel();
     _frameSub?.cancel();
     _eventSub?.cancel();
     CameraControl.stopCamera();
@@ -288,6 +319,56 @@ class _CameraScreenState extends State<CameraScreen> {
       );
     } finally {
       if (mounted) setState(() => _wbPending = false);
+    }
+  }
+
+  void _onFocusChanged(double value) {
+    setState(() {
+      _currentFocusDistance = value;
+      _showFocusSlider = true;
+    });
+    _focusSliderTimer?.cancel();
+    _focusSliderTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _showFocusSlider = false);
+    });
+    CameraControl.setFocusDistance(value);
+  }
+
+  Future<void> _toggleAf() async {
+    final previousAf = _afEnabled;
+
+    // Fetch live focus distance right before we disable AF
+    double nextFocusDistance = _currentFocusDistance;
+    if (_afEnabled) {
+      nextFocusDistance = await CameraControl.getCurrentFocusDistance();
+    }
+
+    setState(() {
+      _afEnabled = !_afEnabled;
+      if (!_afEnabled && _minFocusDistance > 0) {
+        _currentFocusDistance = nextFocusDistance;
+        _showFocusSlider = true;
+        _focusSliderTimer?.cancel();
+        _focusSliderTimer = Timer(const Duration(seconds: 2), () {
+          if (mounted) setState(() => _showFocusSlider = false);
+        });
+      } else {
+        _showFocusSlider = false;
+        _focusSliderTimer?.cancel();
+      }
+    });
+    try {
+      // Optimistically update
+      await CameraControl.setAfEnabled(_afEnabled);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _afEnabled = previousAf);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('AF toggle failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
@@ -351,6 +432,49 @@ class _CameraScreenState extends State<CameraScreen> {
           // ── Left-edge AWB drawer ──
           Positioned(left: 0, top: 0, bottom: 0, child: _buildLeftBar()),
 
+          // ── Focus Slider (appears when dragging or AF disabled) ──
+          if (_showFocusSlider && !_afEnabled && _minFocusDistance > 0)
+            Positioned(
+              left: 80, // Next to the left bar
+              top: MediaQuery.of(context).size.height / 2 - 150,
+              child: Container(
+                height: 300,
+                width: 60,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                child: RotatedBox(
+                  quarterTurns: 3,
+                  child: SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      activeTrackColor: Colors.greenAccent,
+                      inactiveTrackColor: Colors.white24,
+                      thumbColor: Colors.greenAccent,
+                      overlayColor: Colors.greenAccent.withValues(alpha: 0.2),
+                      trackHeight: 4.0,
+                    ),
+                    child: Slider(
+                      value: _currentFocusDistance,
+                      min: 0.0,
+                      max: _minFocusDistance,
+                      onChanged: _onFocusChanged,
+                      onChangeEnd: (_) {
+                        // Restart timer when dragging finishes
+                        _focusSliderTimer?.cancel();
+                        _focusSliderTimer =
+                            Timer(const Duration(seconds: 2), () {
+                          if (mounted) {
+                            setState(() => _showFocusSlider = false);
+                          }
+                        });
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
           // ── Bottom overlay ──
           Positioned(left: 0, right: 0, bottom: 0, child: _buildBottomBar()),
         ],
@@ -386,6 +510,41 @@ class _CameraScreenState extends State<CameraScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                // AF Toggle Button (above WB)
+                GestureDetector(
+                  onTap: _toggleAf,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    color: Colors.transparent,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _afEnabled
+                              ? Icons.center_focus_strong
+                              : Icons.center_focus_weak,
+                          size: 24,
+                          color: _afEnabled
+                              ? Colors.greenAccent
+                              : Colors.white54,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          _afEnabled ? 'AF ON' : 'AF OFF',
+                          style: TextStyle(
+                            color: _afEnabled
+                                ? Colors.greenAccent
+                                : Colors.white54,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // WB Drawer Toggle
                 GestureDetector(
                   onTap: () {
                     setState(() {

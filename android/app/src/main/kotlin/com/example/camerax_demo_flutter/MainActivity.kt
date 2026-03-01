@@ -42,10 +42,15 @@ class MainActivity : FlutterActivity() {
         // ── Register PlatformView factory ──
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "camerax-preview",
-            CameraPreviewFactory { previewView ->
-                // Called when the PlatformView creates the PreviewView
-                manager.setPreviewView(previewView)
-            }
+            CameraPreviewFactory(
+                onViewCreated = { previewView ->
+                    // Called when the PlatformView creates the PreviewView
+                    manager.setPreviewView(previewView)
+                },
+                onViewDisposed = {
+                    manager.onPreviewDisposed()
+                }
+            )
         )
 
         // ── MethodChannel for camera commands ──
@@ -112,8 +117,42 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    "setAfEnabled" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        manager.setAfEnabled(enabled) { error ->
+                            if (error != null) {
+                                result.error("AF_SET_FAILED", error.message, null)
+                            } else {
+                                result.success(null)
+                            }
+                        }
+                    }
+
                     "getAvailableWhiteBalanceModes" -> {
                         result.success(manager.getAvailableWhiteBalanceModes())
+                    }
+
+                    "getMinFocusDistance" -> {
+                        result.success(manager.getMinFocusDistance().toDouble())
+                    }
+
+                    "getCurrentFocusDistance" -> {
+                        result.success(manager.getCurrentFocusDistance().toDouble())
+                    }
+
+                    "setFocusDistance" -> {
+                        val distance = call.argument<Double>("distance")
+                        if (distance != null) {
+                            manager.setFocusDistance(distance.toFloat()) { error ->
+                                if (error != null) {
+                                    result.error("FOCUS_SET_FAILED", error.message, null)
+                                } else {
+                                    result.success(null)
+                                }
+                            }
+                        } else {
+                            result.error("INVALID_ARGUMENT", "Focus distance missing", null)
+                        }
                     }
 
                     "getResolution" -> {

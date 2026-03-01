@@ -14,7 +14,8 @@ class CameraPreviewView(
     context: Context,
     private val viewId: Int,
     creationParams: Map<String, Any>?,
-    private val onViewCreated: (PreviewView) -> Unit
+    private val onViewCreated: (PreviewView) -> Unit,
+    private val onViewDisposed: () -> Unit
 ) : PlatformView {
 
     private val previewView: PreviewView = PreviewView(context).apply {
@@ -29,6 +30,6 @@ class CameraPreviewView(
     override fun getView(): View = previewView
 
     override fun dispose() {
-        // PreviewView cleanup is handled by CameraManager.stopCamera()
+        onViewDisposed()
     }
 }

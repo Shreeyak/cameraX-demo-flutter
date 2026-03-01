@@ -10,12 +10,13 @@ import io.flutter.plugin.platform.PlatformViewFactory
  * Registered with viewType "camerax-preview" in MainActivity.
  */
 class CameraPreviewFactory(
-    private val onViewCreated: (androidx.camera.view.PreviewView) -> Unit
+    private val onViewCreated: (androidx.camera.view.PreviewView) -> Unit,
+    private val onViewDisposed: () -> Unit
 ) : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
 
     override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
         @Suppress("UNCHECKED_CAST")
         val params = args as? Map<String, Any>
-        return CameraPreviewView(context, viewId, params, onViewCreated)
+        return CameraPreviewView(context, viewId, params, onViewCreated, onViewDisposed)
     }
 }
