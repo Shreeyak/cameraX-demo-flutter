@@ -128,6 +128,55 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    "setAeEnabled" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        manager.setAeEnabled(enabled) { error ->
+                            if (error != null) {
+                                result.error("AE_SET_FAILED", error.message, null)
+                            } else {
+                                result.success(null)
+                            }
+                        }
+                    }
+
+                    "getExposureOffsetStep" -> {
+                        result.success(manager.getExposureOffsetStep())
+                    }
+
+                    "getExposureOffsetRange" -> {
+                        result.success(manager.getExposureOffsetRange())
+                    }
+
+                    "setExposureOffset" -> {
+                        val index = call.argument<Int>("index") ?: 0
+                        manager.setExposureOffset(index) { error ->
+                            if (error != null) {
+                                result.error("EXPOSURE_OFFSET_FAILED", error.message, null)
+                            } else {
+                                result.success(null)
+                            }
+                        }
+                    }
+
+                    "getMinZoomRatio" -> {
+                        result.success(manager.getMinZoomRatio().toDouble())
+                    }
+
+                    "getMaxZoomRatio" -> {
+                        result.success(manager.getMaxZoomRatio().toDouble())
+                    }
+
+                    "setZoomRatio" -> {
+                        val ratio = call.argument<Double>("ratio") ?: 1.0
+                        manager.setZoomRatio(ratio.toFloat()) { error ->
+                            if (error != null) {
+                                result.error("ZOOM_RATIO_FAILED", error.message, null)
+                            } else {
+                                result.success(null)
+                            }
+                        }
+                    }
+
                     "getAvailableWhiteBalanceModes" -> {
                         result.success(manager.getAvailableWhiteBalanceModes())
                     }
