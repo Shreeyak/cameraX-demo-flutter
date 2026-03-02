@@ -1,16 +1,23 @@
-# cameraX-demo-flutter
+# CameraX Demo (Flutter)
 
-CameraX demo Flutter app.
+Flutter app backed by a native CameraX layer that exposes low-level camera controls with high performance.
 
-## Getting Started
+![Demo UI](docs/wb-demo-sscreenshot.png)
 
-This project is a starting point for a Flutter application.
+## Highlights
 
-A few resources to get you started if this is your first Flutter project:
+- Native CameraX integration for speed and low-level access.
+- White balance presets via Camera2/CameraX interop.
+- Manual focus distance: query current value and set a target diopter.
+- Exposure controls: toggle AE and adjust exposure compensation range from the device.
+- Zoom controls with device min/max ratios.
+- Flutter bindings to native CameraX showing how to wire MethodChannel/EventChannel.
+- Access to all three CameraX streams: Preview, ImageAnalysis, and ImageCapture.
+- Configurable ImageCapture mode (latency vs quality) for faster grabs when needed.
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+## Run
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```bash
+flutter pub get
+flutter run
+```
