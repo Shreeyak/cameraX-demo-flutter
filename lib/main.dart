@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
@@ -94,12 +95,46 @@ class CameraControl {
   }
 
   /// Set manual focus distance in diopters (0.0 = infinity, up to minFocusDistance).
-  static Future<void> setFocusDistance(double distance) =>
-      _method.invokeMethod('setFocusDistance', {'distance': distance});
+  static Future<void> setFocusDistance(double distance) async {
+    try {
+      await _method.invokeMethod('setFocusDistance', {'distance': distance});
+    } catch (e) {
+      debugPrint('setFocusDistance failed: $e');
+    }
+  }
 
   /// @deprecated Use setWhiteBalancePreset instead.
   static Future<void> setAfEnabled(bool enabled) =>
       _method.invokeMethod('setAfEnabled', {'enabled': enabled});
+
+  static Future<void> setAeEnabled(bool enabled) =>
+      _method.invokeMethod('setAeEnabled', {'enabled': enabled});
+
+  static Future<double> getExposureOffsetStep() async {
+    final result = await _method.invokeMethod<double>('getExposureOffsetStep');
+    return result ?? 0.0;
+  }
+
+  static Future<List<int>> getExposureOffsetRange() async {
+    final result = await _method.invokeMethod<List>('getExposureOffsetRange');
+    return result?.cast<int>() ?? [0, 0];
+  }
+
+  static Future<void> setExposureOffset(int index) =>
+      _method.invokeMethod('setExposureOffset', {'index': index});
+
+  static Future<double> getMinZoomRatio() async {
+    final result = await _method.invokeMethod<double>('getMinZoomRatio');
+    return result ?? 1.0;
+  }
+
+  static Future<double> getMaxZoomRatio() async {
+    final result = await _method.invokeMethod<double>('getMaxZoomRatio');
+    return result ?? 1.0;
+  }
+
+  static Future<void> setZoomRatio(double ratio) =>
+      _method.invokeMethod('setZoomRatio', {'ratio': ratio});
 
   /// Get current resolution info.
   static Future<Map<String, dynamic>> getResolution() async {
@@ -144,6 +179,19 @@ class _CameraScreenState extends State<CameraScreen> {
   double _currentFocusDistance = 0.0;
   bool _showFocusSlider = false;
   Timer? _focusSliderTimer;
+
+  bool _aeEnabled = true;
+  int _exposureOffsetIndex = 0;
+  List<int> _exposureOffsetRange = [0, 0];
+  double _exposureOffsetStep = 0.0;
+  bool _showExposureSlider = false;
+  Timer? _exposureSliderTimer;
+
+  double _minZoomRatio = 1.0;
+  double _maxZoomRatio = 1.0;
+  double _currentZoomRatio = 1.0;
+  bool _showZoomSlider = false;
+  Timer? _zoomSliderTimer;
 
   String _captureResolution = '--';
   String _analysisResolution = '--';
@@ -193,15 +241,33 @@ class _CameraScreenState extends State<CameraScreen> {
         _statusText = 'AF: ON | AE: ON | AWB: AUTO';
       });
 
-      // Fetch supported WB modes and update the preset bar
+      // Fetch supported modes and ranges
       final modes = await CameraControl.getAvailableWhiteBalanceModes();
       final minFocus = await CameraControl.getMinFocusDistance();
+      final exposureRange = await CameraControl.getExposureOffsetRange();
+      final exposureStep = await CameraControl.getExposureOffsetStep();
+      final minZoom = await CameraControl.getMinZoomRatio();
+      final maxZoom = await CameraControl.getMaxZoomRatio();
+
+      // Enable AE by default so exposure compensation works out of the box
+      await CameraControl.setAeEnabled(true);
+
       if (mounted) {
         setState(() {
           if (modes.isNotEmpty) _availableWbModes = modes;
           _minFocusDistance = minFocus;
           // Start focus in the middle if greater than 0
           _currentFocusDistance = minFocus / 2;
+
+          _exposureOffsetRange = exposureRange;
+          _exposureOffsetStep = exposureStep;
+          _exposureOffsetIndex = 0;
+          _aeEnabled = true;
+          _showExposureSlider = false;
+
+          _minZoomRatio = minZoom;
+          _maxZoomRatio = maxZoom;
+          _currentZoomRatio = minZoom;
         });
       }
 
@@ -270,6 +336,8 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   void dispose() {
     _focusSliderTimer?.cancel();
+    _exposureSliderTimer?.cancel();
+    _zoomSliderTimer?.cancel();
     _frameSub?.cancel();
     _eventSub?.cancel();
     CameraControl.stopCamera();
@@ -326,12 +394,18 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() {
       _currentFocusDistance = value;
       _showFocusSlider = true;
+      _showExposureSlider = false;
+      _showZoomSlider = false;
     });
+    _exposureSliderTimer?.cancel();
+    _zoomSliderTimer?.cancel();
     _focusSliderTimer?.cancel();
     _focusSliderTimer = Timer(const Duration(seconds: 2), () {
       if (mounted) setState(() => _showFocusSlider = false);
     });
-    CameraControl.setFocusDistance(value);
+    CameraControl.setFocusDistance(value).catchError((e) {
+      debugPrint('Focus set failed: $e');
+    });
   }
 
   Future<void> _toggleAf() async {
@@ -348,6 +422,10 @@ class _CameraScreenState extends State<CameraScreen> {
       if (!_afEnabled && _minFocusDistance > 0) {
         _currentFocusDistance = nextFocusDistance;
         _showFocusSlider = true;
+        _showExposureSlider = false;
+        _showZoomSlider = false;
+        _exposureSliderTimer?.cancel();
+        _zoomSliderTimer?.cancel();
         _focusSliderTimer?.cancel();
         _focusSliderTimer = Timer(const Duration(seconds: 2), () {
           if (mounted) setState(() => _showFocusSlider = false);
@@ -370,6 +448,90 @@ class _CameraScreenState extends State<CameraScreen> {
         ),
       );
     }
+  }
+
+  Future<void> _toggleAe() async {
+    final previousAe = _aeEnabled;
+
+    setState(() {
+      _aeEnabled = !_aeEnabled;
+      _showExposureSlider = !_aeEnabled;
+      _showFocusSlider = false;
+      _showZoomSlider = false;
+      _focusSliderTimer?.cancel();
+      _zoomSliderTimer?.cancel();
+      _exposureSliderTimer?.cancel();
+      if (_showExposureSlider) {
+        _exposureSliderTimer = Timer(const Duration(seconds: 2), () {
+          if (mounted) setState(() => _showExposureSlider = false);
+        });
+      }
+    });
+
+    try {
+      await CameraControl.setAeEnabled(_aeEnabled);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _aeEnabled = previousAe;
+        _showExposureSlider = !previousAe;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('AE toggle failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  void _onExposureChanged(double value) {
+    final rounded = value.round();
+    setState(() {
+      _exposureOffsetIndex = rounded;
+      _showExposureSlider = true;
+      _showFocusSlider = false;
+      _showZoomSlider = false;
+    });
+    _focusSliderTimer?.cancel();
+    _zoomSliderTimer?.cancel();
+    _exposureSliderTimer?.cancel();
+    _exposureSliderTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _showExposureSlider = false);
+    });
+    CameraControl.setExposureOffset(rounded);
+  }
+
+  void _toggleZoomSlider() {
+    setState(() {
+      _showZoomSlider = !_showZoomSlider;
+      _zoomSliderTimer?.cancel();
+      if (_showZoomSlider) {
+        _showFocusSlider = false;
+        _showExposureSlider = false;
+        _focusSliderTimer?.cancel();
+        _exposureSliderTimer?.cancel();
+        _zoomSliderTimer = Timer(const Duration(seconds: 2), () {
+          if (mounted) setState(() => _showZoomSlider = false);
+        });
+      }
+    });
+  }
+
+  void _onZoomChanged(double value) {
+    setState(() {
+      _currentZoomRatio = value;
+      _showZoomSlider = true;
+      _showFocusSlider = false;
+      _showExposureSlider = false;
+    });
+    _focusSliderTimer?.cancel();
+    _exposureSliderTimer?.cancel();
+    _zoomSliderTimer?.cancel();
+    _zoomSliderTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _showZoomSlider = false);
+    });
+    CameraControl.setZoomRatio(value);
   }
 
   @override
@@ -475,6 +637,111 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
 
+          // ── Exposure Compensation Slider ──
+          if (_showExposureSlider && !_aeEnabled && _exposureOffsetRange.length == 2 && _exposureOffsetRange[1] > _exposureOffsetRange[0])
+            Positioned(
+              left: 80,
+              top: MediaQuery.of(context).size.height / 2 - 150,
+              child: Container(
+                height: 300,
+                width: 72,
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                clipBehavior: Clip.hardEdge,
+                child: RotatedBox(
+                  quarterTurns: 3,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          activeTrackColor: Colors.amberAccent,
+                          inactiveTrackColor: Colors.white24,
+                          thumbColor: Colors.amberAccent,
+                          overlayColor: Colors.amberAccent.withValues(alpha: 0.2),
+                          trackHeight: 4.0,
+                          overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                        ),
+                        child: Slider(
+                          value: _exposureOffsetIndex.toDouble(),
+                          min: _exposureOffsetRange[0].toDouble(),
+                          max: _exposureOffsetRange[1].toDouble(),
+                          divisions: (_exposureOffsetRange[1] - _exposureOffsetRange[0]).toInt(),
+                          onChanged: _onExposureChanged,
+                          onChangeEnd: (_) {
+                            _exposureSliderTimer?.cancel();
+                            _exposureSliderTimer = Timer(const Duration(seconds: 2), () {
+                              if (mounted) setState(() => _showExposureSlider = false);
+                            });
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${(_exposureOffsetIndex * _exposureOffsetStep).toStringAsFixed(1)} EV',
+                        style: const TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+          // ── Zoom Slider ──
+          if (_showZoomSlider)
+            Positioned(
+              left: 80,
+              top: MediaQuery.of(context).size.height / 2 - 150,
+              child: Container(
+                height: 300,
+                width: 72,
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                clipBehavior: Clip.hardEdge,
+                child: RotatedBox(
+                  quarterTurns: 3,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          activeTrackColor: Colors.blueAccent,
+                          inactiveTrackColor: Colors.white24,
+                          thumbColor: Colors.blueAccent,
+                          overlayColor: Colors.blueAccent.withValues(alpha: 0.2),
+                          trackHeight: 4.0,
+                          overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                        ),
+                        child: Slider(
+                          value: _currentZoomRatio,
+                          min: _minZoomRatio,
+                          max: _maxZoomRatio,
+                          onChanged: _onZoomChanged,
+                          onChangeEnd: (_) {
+                            _zoomSliderTimer?.cancel();
+                            _zoomSliderTimer = Timer(const Duration(seconds: 2), () {
+                              if (mounted) setState(() => _showZoomSlider = false);
+                            });
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${_currentZoomRatio.toStringAsFixed(1)}x',
+                        style: const TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
           // ── Bottom overlay ──
           Positioned(left: 0, right: 0, bottom: 0, child: _buildBottomBar()),
         ],
@@ -535,6 +802,62 @@ class _CameraScreenState extends State<CameraScreen> {
                             color: _afEnabled
                                 ? Colors.greenAccent
                                 : Colors.white54,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // AE Toggle Button (shows slider when AE is OFF)
+                GestureDetector(
+                  onTap: _toggleAe,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    color: Colors.transparent,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _aeEnabled ? Icons.exposure : Icons.exposure_outlined,
+                          size: 24,
+                          color: _aeEnabled ? Colors.amberAccent : Colors.white54,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          _aeEnabled ? 'AE ON' : 'AE OFF',
+                          style: TextStyle(
+                            color: _aeEnabled ? Colors.amberAccent : Colors.white54,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // Zoom Toggle Button
+                GestureDetector(
+                  onTap: _toggleZoomSlider,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    color: Colors.transparent,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.zoom_in,
+                          size: 24,
+                          color: Colors.blueAccent,
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Zoom',
+                          style: TextStyle(
+                            color: Colors.white,
                             fontSize: 12,
                             fontWeight: FontWeight.bold,
                           ),

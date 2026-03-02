@@ -88,6 +88,7 @@ class CameraManager(
     // Defaults to AUTO on startup; user can select any supported preset at runtime.
     private var currentAwbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO
     private var afEnabled: Boolean = false
+    private var aeEnabled: Boolean = false
 
     // Stored manual sensor settings — kept in sync with the last successfully
     // applied capture options so that every setCaptureRequestOptions call can
@@ -255,10 +256,16 @@ class CameraManager(
                             // it.  Once we switch to TRANSFORM_MATRIX mode the result
                             // echoes back our own set value, so we stop updating.
                             val awbMode = result.get(CaptureResult.CONTROL_AWB_MODE)
-
-                            // Capture last focus distance for restoring when MF is enabled
-                            result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { focus ->
-                                capturedFocusDistance = focus
+                            if (awbMode == CameraMetadata.CONTROL_AWB_MODE_AUTO) {
+                                result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)?.let {
+                                    capturedColorTransform = it
+                                }
+                                result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let {
+                                    capturedColorGains = it
+                                }
+                                result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let {
+                                    capturedFocusDistance = it
+                                }
                             }
                         }
                     })
@@ -394,12 +401,12 @@ class CameraManager(
                     CameraMetadata.CONTROL_AWB_MODE_OFF               -> "OFF"
                     else -> "mode $currentAwbMode"
                 }
-                Log.i(TAG, "Camera2 interop: AF=${if (afEnabled) "ON" else "OFF"}, AE=OFF, AWB=$awbLabel")
+                Log.i(TAG, "Camera2 interop: AF=${if (afEnabled) "ON" else "OFF"}, AE=${if (aeEnabled) "ON" else "OFF"}, AWB=$awbLabel")
                 pushEvent(
                     type = "status",
                     tag = "cameraSettings",
-                    message = "AF: ${if (afEnabled) "ON" else "OFF"} | AE: OFF | AWB: $awbLabel",
-                    data = mapOf("afEnabled" to afEnabled, "aeEnabled" to false,
+                    message = "AF: ${if (afEnabled) "ON" else "OFF"} | AE: ${if (aeEnabled) "ON" else "OFF"} | AWB: $awbLabel",
+                    data = mapOf("afEnabled" to afEnabled, "aeEnabled" to aeEnabled,
                                  "awbMode" to currentAwbMode)
                 )
             }
@@ -418,11 +425,16 @@ class CameraManager(
     private fun applyAllCaptureOptions(cam: Camera, callback: (Exception?) -> Unit) {
         val camera2Control = Camera2CameraControl.from(cam.cameraControl)
         val afMode = if (afEnabled) CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE else CameraMetadata.CONTROL_AF_MODE_OFF
+        val aeMode = if (aeEnabled) CameraMetadata.CONTROL_AE_MODE_ON else CameraMetadata.CONTROL_AE_MODE_OFF
+
         val builder = CaptureRequestOptions.Builder()
             .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE,  afMode)
-            .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE,  CameraMetadata.CONTROL_AE_MODE_OFF)
-            .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, storedExposureTimeNs)
-            .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY,   storedSensitivityIso)
+            .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE,  aeMode)
+
+        if (!aeEnabled) {
+            builder.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, storedExposureTimeNs)
+                   .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY,   storedSensitivityIso)
+        }
 
         if (!afEnabled) {
             // Apply last known focus distance if we just disabled AF
@@ -766,8 +778,8 @@ class CameraManager(
                 pushEvent(
                     type = "status",
                     tag = "whiteBalance",
-                    message = "AF: ${if (afEnabled) "ON" else "OFF"} | AE: OFF | AWB: $label",
-                    data = mapOf("awbMode" to mode)
+                    message = "AF: ${if (afEnabled) "ON" else "OFF"} | AE: ${if (aeEnabled) "ON" else "OFF"} | AWB: $label",
+                    data = mapOf("awbMode" to mode, "afEnabled" to afEnabled, "aeEnabled" to aeEnabled)
                 )
                 callback(null)
             }
@@ -824,6 +836,101 @@ class CameraManager(
         return Camera2CameraInfo.from(cam.cameraInfo)
             .getCameraCharacteristic(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
             ?.toList() ?: listOf(CameraMetadata.CONTROL_AWB_MODE_AUTO)
+    }
+
+    fun setAeEnabled(enabled: Boolean, callback: (Exception?) -> Unit) {
+        val cam = camera
+        if (cam == null) {
+            callback(IllegalStateException("Camera not ready"))
+            return
+        }
+        val previousAe = aeEnabled
+        aeEnabled = enabled
+        applyAllCaptureOptions(cam) { e ->
+            if (e != null) {
+                Log.e(TAG, "Failed to set AE to $enabled", e)
+                aeEnabled = previousAe
+                callback(e)
+            } else {
+                Log.i(TAG, "AE set to $enabled")
+                val afLabel = if (afEnabled) "ON" else "OFF"
+                val aeLabel = if (enabled) "ON" else "OFF"
+                val awbLabel = when (currentAwbMode) {
+                    CameraMetadata.CONTROL_AWB_MODE_AUTO             -> "AUTO"
+                    CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT      -> "Tungsten"
+                    CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT       -> "Fluor."
+                    CameraMetadata.CONTROL_AWB_MODE_WARM_FLUORESCENT  -> "Warm Fl."
+                    CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT          -> "Sunny"
+                    CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT   -> "Cloudy"
+                    CameraMetadata.CONTROL_AWB_MODE_TWILIGHT          -> "Twilight"
+                    CameraMetadata.CONTROL_AWB_MODE_SHADE             -> "Shade"
+                    CameraMetadata.CONTROL_AWB_MODE_OFF               -> "OFF"
+                    else -> "mode $currentAwbMode"
+                }
+
+                pushEvent(
+                    type = "status",
+                    tag = "cameraSettings",
+                    message = "AF: $afLabel | AE: $aeLabel | AWB: $awbLabel",
+                    data = mapOf("afEnabled" to afEnabled, "aeEnabled" to enabled, "awbMode" to currentAwbMode)
+                )
+                callback(null)
+            }
+        }
+    }
+
+    fun getExposureOffsetStep(): Double {
+        val cam = camera ?: return 0.0
+        val step = cam.cameraInfo.exposureState.exposureCompensationStep
+        return step.toDouble()
+    }
+
+    fun getExposureOffsetRange(): List<Int> {
+        val cam = camera ?: return listOf(0, 0)
+        val range = cam.cameraInfo.exposureState.exposureCompensationRange
+        return listOf(range.lower, range.upper)
+    }
+
+    fun setExposureOffset(index: Int, callback: (Exception?) -> Unit) {
+        val cam = camera
+        if (cam == null) {
+            callback(IllegalStateException("Camera not ready"))
+            return
+        }
+        val future = cam.cameraControl.setExposureCompensationIndex(index)
+        future.addListener({
+            try {
+                future.get()
+                callback(null)
+            } catch (e: Exception) {
+                callback(e)
+            }
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    fun getMinZoomRatio(): Float {
+        return camera?.cameraInfo?.zoomState?.value?.minZoomRatio ?: 1.0f
+    }
+
+    fun getMaxZoomRatio(): Float {
+        return camera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1.0f
+    }
+
+    fun setZoomRatio(ratio: Float, callback: (Exception?) -> Unit) {
+        val cam = camera
+        if (cam == null) {
+            callback(IllegalStateException("Camera not ready"))
+            return
+        }
+        val future = cam.cameraControl.setZoomRatio(ratio)
+        future.addListener({
+            try {
+                future.get()
+                callback(null)
+            } catch (e: Exception) {
+                callback(e)
+            }
+        }, ContextCompat.getMainExecutor(context))
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
